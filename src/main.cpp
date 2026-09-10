@@ -82,6 +82,12 @@ const char* opcionesProgramas [OPCIONES_PROGRAMA] = {
   ">> CONFIRMAR <<"
 };
 
+const int OPCION_CORRIENDO = 2;
+const char* opciones_Corriendo [OPCION_CORRIENDO]={
+  "¿Cancelar?",
+  "Modificar valores"
+};
+
 //CONTADOR PARA DESPLAZAR EL SCROLL 
 int selectedItem = 0; 
 
@@ -96,6 +102,15 @@ int   diasGoal;
 bool motorON = false; 
 
 bool  editMode = false; //para saber si vamos a modificar algun valor o nos desplazamos en el menu 
+
+// Carrusel de vistas en RUNNING_AUTO
+int autoScreenPage = 0;
+unsigned long lastAutoScreenSwitch = 0;
+const unsigned long AUTO_SCREEN_INTERVAL = 4000; // Alternar cada 4 segundos
+
+// Control de tiempo de incubación
+unsigned long startTimeIncubation = 0;
+int diasTranscurridos = 0;
 
 
 
@@ -176,6 +191,112 @@ void actualizarMenu (){
         pantalla.print(motorON ? "ON " : "OFF");
       }
     }
+  } else if (currentState == RUNNING_AUTO){
+    //COMO SE VERA LA PANTALLA DE RUNNING AUTO
+    pantalla.setTextSize(1); 
+    pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+    pantalla.setCursor(6,4);
+    pantalla.print("CORRIENDO AUTO");
+    pantalla.setTextColor(motorON ? ST7735_YELLOW : ST77XX_DARKGREY, ST7735_BLACK);
+    pantalla.setCursor(95,4);
+    pantalla.print(motorON ? "Volteo: ON" : "Volteo: OFF");
+    pantalla.drawFastHLine(0, 16, 160, ST77XX_DARKGREY);
+
+    //LIMPIAR PANTALLA PARA IR CAMBIANDO 
+    pantalla.fillRect (0, 18, 160, 75, ST7735_BLACK);
+
+    //QUE HACE CADA GIRO
+    if (autoScreenPage == 0){
+      //VISTA TEMPERATURA
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+      pantalla.setCursor(8, 22);
+      pantalla.print("TEMP CONTROL");
+
+      //MOSTAR VALOR ACTUAL 
+      pantalla.setTextSize(3);
+      pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
+      pantalla.setCursor(10, 36);
+      pantalla.printf("%.1f", currentTemp);
+      pantalla.setTextSize(2);
+      pantalla.print("C");
+
+      //MOSTRAR VALOR FIJADO POR USUSARIO
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST77XX_DARKGREY, ST7735_BLACK);
+      pantalla.setCursor(10, 68);
+      pantalla.print("VALOR FIJADO: ");
+      pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+      pantalla.printf("%.1f C", tempGoal);
+    }
+    else if (autoScreenPage == 1){
+      //VISTA HUMEDAD
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+      pantalla.setCursor(8, 22);
+      pantalla.print("HUMEDAD CONTROL");
+
+      //MOSTAR VALOR ACTUAL 
+      pantalla.setTextSize(3);
+      pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
+      pantalla.setCursor(10, 36);
+      pantalla.printf("%d %%", currentHumid);
+      pantalla.setTextSize(2);
+      pantalla.print("%");
+
+      //MOSTRAR VALOR FIJADO POR USUSARIO
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST77XX_DARKGREY, ST7735_BLACK);
+      pantalla.setCursor(10, 68);
+      pantalla.print("VALOR FIJADO: ");
+      pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+      pantalla.printf("%d %%", humidGoal);
+    }
+    else if (autoScreenPage == 2){
+      //TIEMPO RESTANTE
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+      pantalla.setCursor(8, 22);
+      pantalla.print("TIEMPO RESTANTE");
+
+      int diasRestantes = diasGoal-diasTranscurridos;
+      if (diasRestantes < 0) diasRestantes= 0; 
+
+      //MOSTAR VALOR ACTUAL 
+      pantalla.setTextSize(3);
+      pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
+      pantalla.setCursor(20, 36);
+      pantalla.printf("%.d", diasRestantes);
+      pantalla.setTextSize(2);
+      pantalla.print(" DIAS");
+
+      //MOSTRAR VALOR FIJADO POR USUSARIO
+      pantalla.setTextSize(1);
+      pantalla.setTextColor(ST77XX_DARKGREY, ST7735_BLACK);
+      pantalla.setCursor(10, 68);
+      pantalla.printf("TOTAL META: %d DIAS", diasGoal);
+    }
+
+    pantalla.drawFastHLine(0, 94, 160, ST77XX_DARKGREY);
+    for (int i = 0 ; i <OPCION_CORRIENDO ; i++){
+        int posY = 98 + (i * 14);
+        if (i == selectedItem ){
+          pantalla.fillRect(4, posY, 152, 12, ST7735_BLUE);
+          pantalla.setTextColor(ST7735_WHITE);
+          pantalla.setTextSize(1);
+          pantalla.setCursor(8, posY + 2);
+          pantalla.print(">");
+        } else {
+          pantalla.fillRect(4, posY, 152, 12, ST7735_BLACK);
+          pantalla.setTextColor(ST7735_BLACK);
+          pantalla.setTextSize(1);
+          pantalla.setCursor(8, posY + 2);
+          pantalla.print(" ");
+        }
+        pantalla.print(opciones_Corriendo[i]);
+    }
+
+
   } 
 }
 
@@ -231,6 +352,17 @@ void loop() {
   
   leerEncoder();
   botonPresionado();
+
+  //FUNCION PARA HACER ROTAR LAS IMAGENES ISN BLOQUEAR AL PROCESADOR
+  if (currentState == RUNNING_AUTO){
+    if (millis() - lastAutoScreenSwitch >= AUTO_SCREEN_INTERVAL){
+      //SI YA PASARON 4 SEGUNDOS
+      lastAutoScreenSwitch = millis();
+      autoScreenPage = (autoScreenPage +1) % 3;
+      actualizarMenu();
+    } 
+
+  }
   
 }
 void leerEncoder() {
@@ -296,7 +428,14 @@ void leerEncoder() {
           }
         }
       }
-
+      // 3. NAVEGACIÓN EN programa AUTO
+      if (currentState == RUNNING_AUTO) {
+        if (giroHorario) {
+          if (selectedItem < OPCION_CORRIENDO - 1) selectedItem++;
+        } else {
+          if (selectedItem > 0) selectedItem--;
+        }
+      }
       actualizarMenu();
   }
 }
@@ -347,10 +486,16 @@ void botonPresionado (){
         }
       }
       if (currentState == MODIFY_PROGRAM){
+
+        //opcion para iniciar el programa
         if (selectedItem == 4){
             currentState = RUNNING_AUTO; 
             editMode = false; 
+            startTimeIncubation = millis(); 
+            autoScreenPage = 0;
+            lastAutoScreenSwitch = millis (); 
             pantalla.fillScreen(ST7735_BLACK);
+            actualizarMenu (); 
             //completar de dibujar la pantalla de monitoreo en programa auto 
         }
         else if (selectedItem == 2){
@@ -360,6 +505,23 @@ void botonPresionado (){
           actualizarMenu ();
         }
       } 
+      else if (currentState == RUNNING_AUTO){
+        if (selectedItem == 0){
+          //cancelar
+          currentState = MENU_SELECT;
+          selectedItem = 0;
+          pantalla.fillScreen(ST7735_BLACK);
+          actualizarMenu();
+        }
+        else if (selectedItem == 1){
+          //MODIFICAR
+          currentState = MODIFY_PROGRAM;
+          selectedItem = 0 ;
+          editMode = false;
+          pantalla.fillScreen(ST7735_BLACK);
+          actualizarMenu();
+        }
+      }
     }
     }
   }
