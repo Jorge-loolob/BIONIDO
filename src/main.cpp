@@ -37,7 +37,8 @@ enum SystemState {
   MENU_SELECT,
   MODIFY_PROGRAM,
   RUNNING_AUTO,
-  TEST_ACTUATORS
+  TEST_ACTUATORS,
+  MODIFY_TIME
 };
 //ESTADO DEL SYSTEMA 
 SystemState currentState = MENU_SELECT; 
@@ -63,7 +64,7 @@ void programaFermentacion ();
 void setTemperature (float temp);
 void IRAM_ATTR isrEncoder(); 
 
-//CONFIGURACION MENU
+//CONFIGURACIONES MENU
 const int TOTAL_MENU_ITEMS = 5; 
 const char* menuItems [TOTAL_MENU_ITEMS] = {
   "1. Huevos (Gallina)",
@@ -88,6 +89,14 @@ const char* opciones_Corriendo [OPCION_CORRIENDO]={
   "Modificar valores"
 };
 
+const int OPCIONES_TIEMPO = 4;
+const char* opciones_Tiempo [OPCIONES_TIEMPO] = {
+  "DIAS: ",
+  "HORAS: ",
+  "MINUTOS: ",
+  ">> VOLVER <<"
+};
+
 //CONTADOR PARA DESPLAZAR EL SCROLL 
 int selectedItem = 0; 
 
@@ -98,7 +107,9 @@ int   humidGoal; //humedad fijada por usuario
 int   currentHumid; //humedad medida por sensores
 float tempGoal; //temperatura fijada por el usuario
 float currentTemp; //temperatura actual (medida por sensores)
-int   diasGoal; 
+int   diasGoal;
+int   horasGoal;
+int   minutosGoal; 
 bool motorON = false; 
 
 bool  editMode = false; //para saber si vamos a modificar algun valor o nos desplazamos en el menu 
@@ -185,8 +196,7 @@ void actualizarMenu (){
         pantalla.print(humidGoal);
         pantalla.print(" %");
       } else if (i == 2) {
-        pantalla.print(diasGoal);
-        pantalla.print(" dias");
+        pantalla.printf("%dd %02dh %02dm", diasGoal, horasGoal, minutosGoal);
       } else if (i == 3) {
         pantalla.print(motorON ? "ON " : "OFF");
       }
@@ -297,6 +307,41 @@ void actualizarMenu (){
     }
 
 
+  }
+  else if (currentState == MODIFY_TIME){
+    //PINTAR LO QUE SIEMPRE SE TIENE QUE VER MIENTRAS ESTAMOS EN MODIFY TIME
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+    pantalla.setCursor(10, 8);
+    pantalla.print("AJUSTE DE TIEMPO");
+    pantalla.drawFastHLine(0, 20, 160, ST77XX_DARKGREY);
+
+    for (int i = 0; i < OPCIONES_TIEMPO ; i++){
+      int posY = 28 + (i * 20);
+      if (i == selectedItem){
+        uint16_t colorFondo = editMode ? ST7735_ORANGE : ST7735_BLUE;
+        pantalla.fillRect(6, posY - 2, 148, 17, colorFondo);
+        pantalla.setTextColor(ST7735_WHITE);
+        pantalla.setTextSize(1);
+        pantalla.setCursor(10, posY + 3);
+        pantalla.print(editMode ? "* " : "> ");
+      } else {
+        pantalla.fillRect(6, posY - 2, 148, 17, ST77XX_BLACK);
+        pantalla.setTextColor(ST77XX_DARKGREY);
+        pantalla.setTextSize(1);
+        pantalla.setCursor(10, posY + 3);
+        pantalla.print("  ");
+      }
+      pantalla.print(opciones_Tiempo[i]); 
+      //AQUI HACE FALTA UNA PARTE PERO NO ESTOY SEGURO DE QUE ES LO QUE HACE 
+      if (i == 0){
+        pantalla.printf("%d d", diasGoal);
+      } else if (i == 1) {
+        pantalla.printf("%d h", horasGoal);
+      } else if (i == 2) {
+        pantalla.printf("%d m", minutosGoal);
+      }
+    }
   } 
 }
 
@@ -429,11 +474,48 @@ void leerEncoder() {
         }
       }
       // 3. NAVEGACIÓN EN programa AUTO
-      if (currentState == RUNNING_AUTO) {
+      else if (currentState == RUNNING_AUTO) {
         if (giroHorario) {
           if (selectedItem < OPCION_CORRIENDO - 1) selectedItem++;
         } else {
           if (selectedItem > 0) selectedItem--;
+        }
+      }
+      // MODIFICAR TIEMPO 
+      else if (currentState == MODIFY_TIME){
+        if (!editMode){
+            if (giroHorario){
+              if (selectedItem < OPCIONES_TIEMPO - 1) selectedItem++;
+            } else {
+              if (selectedItem > 0) selectedItem--;
+            }
+          } else {
+            switch (selectedItem)
+            {
+            case 0:
+              if (giroHorario){
+                if (diasGoal < 60) {
+                  diasGoal++;
+                }
+              } else if (diasGoal > 0){
+                  diasGoal--;
+              }
+              break;
+            case 1:
+              if (giroHorario){
+                if (horasGoal < 23){
+                  horasGoal++;
+                }}else if (horasGoal>0) horasGoal--;
+              break;
+
+            case 2:
+              if (giroHorario){
+                if (minutosGoal < 59) minutosGoal++;
+              } else if(minutosGoal>0) minutosGoal--;
+
+            default:
+            break;
+          }
         }
       }
       actualizarMenu();
@@ -500,6 +582,11 @@ void botonPresionado (){
         }
         else if (selectedItem == 2){
             // poner la configurarion para hacer dias o horas 
+            currentState = MODIFY_TIME;
+            editMode = false;
+            pantalla.fillScreen(ST7735_BLACK);
+            actualizarMenu();
+        
         } else {
           editMode = !editMode; 
           actualizarMenu ();
@@ -520,6 +607,19 @@ void botonPresionado (){
           editMode = false;
           pantalla.fillScreen(ST7735_BLACK);
           actualizarMenu();
+        }
+      }
+      else if (currentState == MODIFY_TIME){
+        //OPCION VOLVER
+        if (selectedItem == 3){
+          currentState = MODIFY_PROGRAM;
+          selectedItem = 0; 
+          editMode = false; 
+          pantalla.fillScreen(ST7735_BLACK);
+          actualizarMenu(); 
+        } else {
+          editMode=!editMode; 
+          actualizarMenu ();
         }
       }
     }
