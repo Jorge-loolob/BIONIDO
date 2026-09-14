@@ -11,11 +11,11 @@
 // Pines
 #define I2C_SDA 21
 #define I2C_SCL 22
-#define ONE_WIRE_BUS 4
+#define ONE_WIRE_BUS 17 //aqui esta el pin dedicado al TEMP2 
 #define dataLED 26
 #define fan1PWM 27
 #define fan2PWM 16
-#define temp2   17
+#define temp2   17   //este era 17 
 #define rele    14
 #define servo   13
 #define humid   19
@@ -47,7 +47,7 @@ enum SystemError {
     ERR_OK,
     ERR_TEMP,
     ERR_HEAT,
-    ERR_VENTILATION,
+    ERR_HUMEDAD,
     ERR_COMMUNICATION
 };
 
@@ -63,6 +63,8 @@ void programaManual ();
 void programaFermentacion ();
 void setTemperature (float temp);
 void IRAM_ATTR isrEncoder(); 
+void calcularPWMTemp (float temperaturaMeta);
+void manejarCalor (float PWMgenerado);
 
 //CONFIGURACIONES MENU
 const int TOTAL_MENU_ITEMS = 5; 
@@ -106,10 +108,16 @@ int lastClkState;
 int   humidGoal; //humedad fijada por usuario
 int   currentHumid; //humedad medida por sensores
 float tempGoal; //temperatura fijada por el usuario
+float lastTemp; //POR SI FALLAN TODOS LOS SENSORES PONER EL ULTIMO VALOR DE TEMP
 float currentTemp; //temperatura actual (medida por sensores)
+int sensores = 0; //para poner la temperatura de donde la esta sacando 
 int   diasGoal;
 int   horasGoal;
 int   minutosGoal; 
+// variables para el SSR
+float potenciaCalor = 0;
+unsigned long inicioVentana = 0;
+const unsigned long duracionMaxima = 3000; 
 bool motorON = false; 
 
 bool  editMode = false; //para saber si vamos a modificar algun valor o nos desplazamos en el menu 
@@ -122,6 +130,10 @@ const unsigned long AUTO_SCREEN_INTERVAL = 4000; // Alternar cada 4 segundos
 // Control de tiempo de incubación
 unsigned long startTimeIncubation = 0;
 int diasTranscurridos = 0;
+
+//CONTROL TIEMPO DE LECTURA SENSORES
+unsigned long ultimaLectura = 0;
+const unsigned long intervaloLectura = 3000; //3 segundos 
 
 
 
@@ -238,6 +250,33 @@ void actualizarMenu (){
       pantalla.print("VALOR FIJADO: ");
       pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
       pantalla.printf("%.1f C", tempGoal);
+      pantalla.setCursor (10,80);
+      pantalla.setTextSize(1);
+      switch (sensores)
+      {
+      case 0:
+        pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+        pantalla.print("SRC: PROMEDIO (2 SENS)");
+        break;
+
+      case 1:
+        pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+        pantalla.print("SRC: SOLO BME280");
+        break;
+
+      case 2:
+        pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+        pantalla.print("SRC: SOLO DS18B20");
+        break;
+
+      case 3:
+        pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+        pantalla.print("SRC: FALLA (ULTIMO VAL)");
+        break;
+      
+      default:
+        break;
+      }
     }
     else if (autoScreenPage == 1){
       //VISTA HUMEDAD
@@ -269,22 +308,42 @@ void actualizarMenu (){
       pantalla.setCursor(8, 22);
       pantalla.print("TIEMPO RESTANTE");
 
-      int diasRestantes = diasGoal-diasTranscurridos;
-      if (diasRestantes < 0) diasRestantes= 0; 
+      uint32_t totalSegundosGoal = ((uint32_t)diasGoal * 86400UL) + ((uint32_t)horasGoal * 3600UL) + ((uint32_t)minutosGoal * 60UL); 
 
-      //MOSTAR VALOR ACTUAL 
-      pantalla.setTextSize(3);
+      uint32_t segundosTranscurridos = (millis() - startTimeIncubation) / 1000UL;
+      uint32_t segRestantes = totalSegundosGoal - segundosTranscurridos;
+      
+      if (segRestantes < 0) segRestantes= 0; 
+
+      // 2. Desglose en días, horas, minutos y segundos
+      int rDias    = segRestantes / 86400UL;
+      int rHoras   = (segRestantes % 86400UL) / 3600UL;
+      int rMinutos = (segRestantes % 3600UL) / 60UL;
+      int rSeg     = segRestantes % 60UL;
+
+      // 3. Mostrar tiempo restante grande según la escala
       pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
-      pantalla.setCursor(20, 36);
-      pantalla.printf("%.d", diasRestantes);
-      pantalla.setTextSize(2);
-      pantalla.print(" DIAS");
 
-      //MOSTRAR VALOR FIJADO POR USUSARIO
+
+      if (rDias > 0){
+        //SI QUEDAN DIAS NO HACE FALTA TANTA PRECISION DIAS+ HORAS
+        pantalla.setTextSize(3);
+        pantalla.setCursor(10, 36);
+        pantalla.printf("%dd", rDias);
+        pantalla.setTextSize(2);
+        pantalla.printf(" %02dh", rHoras);
+      } else {
+        pantalla.setTextSize(2);
+        pantalla.setCursor (16,40);
+        pantalla.printf("%02d:%02d:%02d", rHoras, rMinutos, rSeg);
+      }
+
+      //AQUI LO QUE PUSO EL USUARIO
+      pantalla.setCursor (10,68);
       pantalla.setTextSize(1);
       pantalla.setTextColor(ST77XX_DARKGREY, ST7735_BLACK);
-      pantalla.setCursor(10, 68);
-      pantalla.printf("TOTAL META: %d DIAS", diasGoal);
+      pantalla.printf ("META: %dd %02dh %02dm", diasGoal, horasGoal, minutosGoal);
+
     }
 
     pantalla.drawFastHLine(0, 94, 160, ST77XX_DARKGREY);
@@ -349,6 +408,8 @@ void setup() {
   pinMode(ENC_CLK, INPUT_PULLUP);
   pinMode(ENC_DT, INPUT_PULLUP);
   pinMode(ENC_SW, INPUT_PULLUP); 
+  pinMode(rele, OUTPUT);
+  digitalWrite(rele,LOW); 
 
   // Leemos el estado inicial de reposo de CLK (casi siempre HIGH)
   lastClkState = digitalRead(ENC_CLK);
@@ -364,8 +425,16 @@ void setup() {
   delay(1000);
   Serial.println("\n=== SISTEMA DE MONITOREO DE TEMPERATURA LISTO ===");
 
+  //EMPEZAR PROTOCOLO ONE WIRE
+  ds18b20.begin();
+  ds18b20.setResolution(12);
+  ds18b20.setWaitForConversion(false); // <--- CLAVE PARA NO CONGELAR EL LOOP
+  ds18b20.requestTemperatures();       // Pedir primera conversión inicial
+
   //empezar prtocolo I2C
   Wire.begin(I2C_SDA, I2C_SCL);
+
+  
 
   pantalla.initR(INITR_BLACKTAB); 
   pantalla.setRotation(1); 
@@ -373,20 +442,28 @@ void setup() {
   actualizarMenu(); 
 
   //CONFIGURAR PWM
-  ledcSetup(0,2500,8); //PWM ventilador para resistencia (canal 0, freq 25k, 8 bit resolution)
+  ledcSetup(0,25000,8); //PWM ventilador para resistencia (canal 0, freq 25k, 8 bit resolution)
   ledcAttachPin(fan1PWM,0);//unir el canal de pwm arriba con el pin de pwm de ventilador
   ledcWrite(0,0); 
   ledcSetup(1,25000,8); //pwm ventilador para sacar el aire
   ledcAttachPin(fan2PWM,1);
   ledcWrite(1,0);
 
+// INICIALIZACIÓN BME280
   if (!bme.begin(0x76, &Wire)) {
-    Serial.println("[ERROR] BME280 no detectado.");
+    Serial.println("[ERROR] No se detectó BME280.");
   } else {
     Serial.println("[OK] BME280 inicializado en 0x76.");
+
+    // Configuración explícita de registros internos recomendada por Bosch
+    bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+                    Adafruit_BME280::SAMPLING_X2,
+                    Adafruit_BME280::SAMPLING_X1,
+                    Adafruit_BME280::SAMPLING_X1,
+                    Adafruit_BME280::FILTER_X4,
+                    Adafruit_BME280::STANDBY_MS_1000);
   }
 
-  ds18b20.begin();
   Serial.printf("[OK] Sensores DS18B20 encontrados: %d\n", ds18b20.getDeviceCount());
   Serial.println("=================================================\n");
 }
@@ -395,21 +472,64 @@ unsigned long lastSensorTime = 0;
 
 void loop() {
   
+  if (currentTemp != lastTemp){
+    lastTemp = currentTemp; 
+  }
+
   leerEncoder();
   botonPresionado();
 
-  //FUNCION PARA HACER ROTAR LAS IMAGENES ISN BLOQUEAR AL PROCESADOR
+  //FUNCION PARA HACER ROTAR LAS IMAGENES SIN BLOQUEAR AL PROCESADOR
   if (currentState == RUNNING_AUTO){
+    manejarCalor(potenciaCalor);
     if (millis() - lastAutoScreenSwitch >= AUTO_SCREEN_INTERVAL){
       //SI YA PASARON 4 SEGUNDOS
       lastAutoScreenSwitch = millis();
       autoScreenPage = (autoScreenPage +1) % 3;
       actualizarMenu();
+      calcularPWMTemp(tempGoal);
     } 
+  }
 
+  //LECTURA DE SENSORES
+  if (millis()-ultimaLectura >= intervaloLectura){
+    ultimaLectura = millis();
+
+    //LECTURA TEMPERATURA ONE WIRE
+    float tempOneWire = ds18b20.getTempCByIndex(0); //TRAER LA PRIMERA TEMPERATURA DEL PRIMER SENSOR EN EL BUS
+    ds18b20.requestTemperatures(); //DECIR AL BUS QUE VAS A PREGUNTAR POR TEMPERATURA
+    
+    //LECTURA TEMPERATURA Y HUMEDAD
+    float tempBME280 = bme.readTemperature(); //TEMP en CELCIUS
+    currentHumid = bme.readHumidity(); //humedad en porcentaje
+
+    bool oneWireValido = (tempOneWire != DEVICE_DISCONNECTED_C && tempOneWire > -50.0);
+    bool BMEValido = !isnan(tempBME280);
+
+    //CASO 1 AMBOS SENSORE FUNCIONAN
+    if (oneWireValido && BMEValido){
+      sensores = 0; // CASO 0 = TODO FUNCIONA  esta variable se va a usar cuando se vea la temp
+      currentTemp = ((tempOneWire + tempBME280)/2);
+    }
+    //CASO 2 SENSOR HUMEDAD Y TEMP FUNCIONA
+    else if (!oneWireValido && BMEValido){
+      sensores = 1; // CASO 1 = FUNCIONA SOLO HUMEDAD Y TEMPERATURA
+      currentTemp = tempBME280; 
+    }
+    //CASO 3 SENSOR ONEWIRE FUNCIONA SOLO
+    else if (oneWireValido && !BMEValido){
+      sensores = 2; //CASO 2 = FUNCIONA SOLO ONEWIRE
+      currentTemp = tempOneWire;
+    }
+    //CASO 4 NINGUNO FUNCIONA 
+    else {
+      sensores = 3; // NADA FUNCIONA PARAR EL CALENTAMIENTO Y SACAR AIRE 
+      currentTemp = lastTemp; 
+    }
   }
   
 }
+
 void leerEncoder() {
   if (pasosEncoder == 0){
     return; 
@@ -512,6 +632,7 @@ void leerEncoder() {
               if (giroHorario){
                 if (minutosGoal < 59) minutosGoal++;
               } else if(minutosGoal>0) minutosGoal--;
+              break;
 
             default:
             break;
@@ -597,6 +718,9 @@ void botonPresionado (){
           //cancelar
           currentState = MENU_SELECT;
           selectedItem = 0;
+          ledcWrite (0, 0); //apagar ventiladores
+          ledcWrite (1,0);
+          digitalWrite(rele, LOW);//apagar rele 
           pantalla.fillScreen(ST7735_BLACK);
           actualizarMenu();
         }
@@ -725,18 +849,9 @@ void IRAM_ATTR isrEncoder() {
 }
 
 
- /*
+ 
 //revisar los sensores de tempratura y revisar temperatura constante
-void checkTemperature (float temp) { //valor de entrada es la temp meta 
-    float toleranceTemp = temp + 1 ;
-
-    if (currentTemp >= toleranceTemp-2) // TEMPERATURA POR DEBAJO 
-       calcularPWMTemp(temp);
-
-} 
-
-
-void calcularPWMTemp (int temperaturaMeta){
+void calcularPWMTemp (float temperaturaMeta){
 
   float diferencia =(temperaturaMeta - currentTemp);
 
@@ -744,6 +859,7 @@ void calcularPWMTemp (int temperaturaMeta){
   if (diferencia > 0){
     //poner el ventilador-resistencia al 50% para mover el aire de la resistencia
     ledcWrite(0,128);
+    ledcWrite(1,0); //ventilador extractor apagado
 
     if (diferencia >= 10 ){ //encender al 100% la resistencia
       potenciaCalor = 100.00;
@@ -780,4 +896,19 @@ void calcularPWMTemp (int temperaturaMeta){
       {ledcWrite(1,0);}
   }
 
-} */
+} 
+
+void manejarCalor (float PWMgenerado){
+  unsigned long tiempoActual = millis();
+
+  if (tiempoActual-inicioVentana >= duracionMaxima){
+    inicioVentana = tiempoActual; 
+  } 
+  unsigned long tiempoEncendido = (unsigned long)((PWMgenerado/100) * duracionMaxima ); //calcula cuanto milisegundos se queda encedidos
+
+  if ( PWMgenerado >0 && (tiempoActual - inicioVentana) < tiempoEncendido){
+    digitalWrite(rele, HIGH); 
+  } else {
+    digitalWrite(rele, LOW);
+  }
+}
