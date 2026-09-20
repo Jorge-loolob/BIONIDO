@@ -6,6 +6,7 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
+#include <Adafruit_NeoPixel.h>
 
 #define ST77XX_DARKGREY 0x7BEF
 // Pines
@@ -18,7 +19,8 @@
 #define temp2   17   //este era 17 
 #define rele    14
 #define servo   13
-#define humid   19
+#define humid   5
+#define buzzer  4
 //PANTALLA Y ENCODER
 #define TFT_CS    15
 #define TFT_RST    2
@@ -38,7 +40,9 @@ enum SystemState {
   MODIFY_PROGRAM,
   RUNNING_AUTO,
   TEST_ACTUATORS,
-  MODIFY_TIME
+  MODIFY_TIME,
+  PROGRAM_DONE,
+  MODIFY_COLOR
 };
 //ESTADO DEL SYSTEMA 
 SystemState currentState = MENU_SELECT; 
@@ -65,6 +69,23 @@ void setTemperature (float temp);
 void IRAM_ATTR isrEncoder(); 
 void calcularPWMTemp (float temperaturaMeta);
 void manejarCalor (float PWMgenerado);
+void calcularPWMHumedad (int humedadMeta);
+void manejarHumedad (int PWMHumedad);  
+void reiniciarBME280(); 
+
+
+//DEFINIR COLORES PARA LEDS: 
+const uint32_t COLOR_ROJO     = Adafruit_NeoPixel::Color(255, 0, 0);
+const uint32_t COLOR_VERDE    = Adafruit_NeoPixel::Color(0, 255, 0);
+const uint32_t COLOR_AZUL     = Adafruit_NeoPixel::Color(0, 0, 255);
+const uint32_t COLOR_BLANCO   = Adafruit_NeoPixel::Color(255, 255, 255);
+const uint32_t COLOR_AMBAR    = Adafruit_NeoPixel::Color(255, 140, 20); // Luz cálida
+const uint32_t COLOR_MORADO   = Adafruit_NeoPixel::Color(180, 0, 255);
+const uint32_t COLOR_CYAN     = Adafruit_NeoPixel::Color(0, 255, 255);
+const uint32_t COLOR_APAGADO  = Adafruit_NeoPixel::Color(0, 0, 0);
+
+int colorLedsIndex = 0; // Índice de nombresColores[] (0 a 5)
+
 
 //CONFIGURACIONES MENU
 const int TOTAL_MENU_ITEMS = 5; 
@@ -76,12 +97,24 @@ const char* menuItems [TOTAL_MENU_ITEMS] = {
   "5. Modo Manual"
 }; 
 
-const int OPCIONES_PROGRAMA = 5;
+//menu PARA CAMBIAR DE COLOR LED
+const int TOTAL_COLORES = 6; 
+const char* nombresColores [TOTAL_COLORES] = {
+  "Ambar (Calido)",
+  "Blanco Puro",
+  "Azul Frio",
+  "Verde",
+  "Rojo",
+  "Apagado"
+}; 
+
+const int OPCIONES_PROGRAMA = 6;
 const char* opcionesProgramas [OPCIONES_PROGRAMA] = {
   "Temperatura: ",
   "Humedad: ",
   "Tiempo: ",
   "Motor: ",
+  "Color Iluminacion",
   ">> CONFIRMAR <<"
 };
 
@@ -99,6 +132,26 @@ const char* opciones_Tiempo [OPCIONES_TIEMPO] = {
   ">> VOLVER <<"
 };
 
+// Tabla de conversión a formato de color para pantalla ST7735 (RGB565 de 16 bits)
+const uint16_t coloresTFT[TOTAL_COLORES] = {
+  0xFBE0,          // Ámbar / Luz Cálida
+  ST7735_WHITE,    // Blanco
+  ST7735_BLUE,     // Azul
+  ST77XX_GREEN,    // Verde
+  ST7735_RED,      // Rojo
+  0x18C3           // Gris oscuro para "Apagado"
+};
+
+// Tabla para la librería NeoPixel
+const uint32_t tablaColoresNeo[TOTAL_COLORES] = {
+  COLOR_AMBAR,
+  COLOR_BLANCO,
+  COLOR_AZUL,
+  COLOR_VERDE,
+  COLOR_ROJO,
+  COLOR_APAGADO
+};
+
 //CONTADOR PARA DESPLAZAR EL SCROLL 
 int selectedItem = 0; 
 
@@ -107,6 +160,7 @@ int lastClkState;
 
 int   humidGoal; //humedad fijada por usuario
 int   currentHumid; //humedad medida por sensores
+int   lastHumid; 
 float tempGoal; //temperatura fijada por el usuario
 float lastTemp; //POR SI FALLAN TODOS LOS SENSORES PONER EL ULTIMO VALOR DE TEMP
 float currentTemp; //temperatura actual (medida por sensores)
@@ -114,11 +168,22 @@ int sensores = 0; //para poner la temperatura de donde la esta sacando
 int   diasGoal;
 int   horasGoal;
 int   minutosGoal; 
+uint32_t segRestantes = 0;
 // variables para el SSR
 float potenciaCalor = 0;
 unsigned long inicioVentana = 0;
 const unsigned long duracionMaxima = 3000; 
 bool motorON = false; 
+
+//VARIABLES PARA SONAR ALARMA 
+bool alarmaOn = false; //FLAG PARA HACER QUE SEA INTERNMITENTE LA ALARMA 
+unsigned long ultimaAlarma = 0;
+const unsigned long tiempoAlarma = 5000; 
+
+//VARIABLES PARA ACTIVAR HUMIDIFICADOR
+int potenciaHumedad = 0; 
+unsigned long empiezaConteo = 0; 
+const unsigned long tiempoMaximo = 5000;
 
 bool  editMode = false; //para saber si vamos a modificar algun valor o nos desplazamos en el menu 
 
@@ -146,6 +211,9 @@ const unsigned long debounceDelay = 50; // 50 milisegundos de filtro
 Adafruit_BME280 bme;
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18b20(&oneWire);
+
+//CONSTRUCTOR LEDS
+Adafruit_NeoPixel tiraLed (32, dataLED , NEO_GRB + NEO_KHZ800); //CUANTOS LED, QUE PIN, PROTOCOOLO, FRCUENCIA
 
 
 //CONSTRUCTOR PANTALLA
@@ -179,7 +247,7 @@ void actualizarMenu (){
   }
 } else if (currentState == MODIFY_PROGRAM) {
     for (int i = 0; i < OPCIONES_PROGRAMA; i++) {
-      int posY = 26 + (i * 17);
+      int posY = 18 + (i * 18);
 
       if (i == selectedItem) {
         // Seleccionar color según el modo
@@ -211,6 +279,8 @@ void actualizarMenu (){
         pantalla.printf("%dd %02dh %02dm", diasGoal, horasGoal, minutosGoal);
       } else if (i == 3) {
         pantalla.print(motorON ? "ON " : "OFF");
+      }else if (i == 4) {
+        pantalla.print(nombresColores[colorLedsIndex]);
       }
     }
   } else if (currentState == RUNNING_AUTO){
@@ -311,7 +381,7 @@ void actualizarMenu (){
       uint32_t totalSegundosGoal = ((uint32_t)diasGoal * 86400UL) + ((uint32_t)horasGoal * 3600UL) + ((uint32_t)minutosGoal * 60UL); 
 
       uint32_t segundosTranscurridos = (millis() - startTimeIncubation) / 1000UL;
-      uint32_t segRestantes = totalSegundosGoal - segundosTranscurridos;
+      segRestantes = totalSegundosGoal - segundosTranscurridos;
       
       if (segRestantes < 0) segRestantes= 0; 
 
@@ -402,6 +472,84 @@ void actualizarMenu (){
       }
     }
   } 
+  else if (currentState == PROGRAM_DONE){
+    pantalla.fillScreen(ST7735_BLACK);
+
+    // 1. Cabecera
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST77XX_GREEN, ST7735_BLACK);
+    pantalla.setCursor(14, 8);
+    pantalla.print("** CICLO FINALIZADO **");
+    pantalla.drawFastHLine(0, 20, 160, ST77XX_DARKGREY);
+
+    // 2. Mensaje central
+    pantalla.setTextSize(2);
+    pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+    pantalla.setCursor(46, 30);
+    pantalla.print("LISTO!");
+
+    // 3. Resumen de condiciones al terminar
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+    pantalla.setCursor(14, 56);
+    pantalla.printf("TEMP FINAL : %.1f C", currentTemp);
+
+    pantalla.setCursor(14, 72);
+    pantalla.printf("HUMEDAD    : %d %%", currentHumid);
+
+    // 4. Botón interactivo de salida
+    pantalla.drawFastHLine(0, 94, 160, ST77XX_DARKGREY);
+    pantalla.fillRect(8, 102, 144, 18, ST7735_BLUE);
+    pantalla.setTextColor(ST7735_WHITE, ST7735_BLUE);
+    pantalla.setTextSize(1);
+    pantalla.setCursor(18, 107);
+    pantalla.print("> MENU PRINCIPAL");
+  }
+  else if (currentState == MODIFY_COLOR){
+    // 1. Cabecera fija
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+    pantalla.setCursor(26, 6);
+    pantalla.print("ILUMINACION LED");
+    pantalla.drawFastHLine(0, 18, 160, ST77XX_DARKGREY);
+
+    // 2. Recuadro gráfico con el color seleccionado
+    pantalla.drawRect(28, 26, 104, 26, ST7735_WHITE);
+    pantalla.fillRect(30, 28, 100, 22, coloresTFT[colorLedsIndex]);
+
+    // 3. Nombre del color centrado debajo de la muestra
+    pantalla.fillRect(0, 58, 160, 12, ST7735_BLACK); // Limpia solo el renglón del texto
+    pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+    pantalla.setTextSize(1);
+    pantalla.setCursor(20, 60);
+    pantalla.printf("Color: %s", nombresColores[colorLedsIndex]);
+
+    pantalla.drawFastHLine(0, 78, 160, ST77XX_DARKGREY);
+
+    // 4. Opciones inferiores (0: Modificar Color, 1: Volver)
+    for (int i = 0; i < 2; i++) {
+      int posY = 86 + (i * 18); // 86 y 104
+
+      if (i == selectedItem) {
+        uint16_t colorFondo = editMode ? ST7735_ORANGE : ST7735_BLUE;
+        pantalla.fillRect(6, posY - 2, 148, 15, colorFondo);
+        pantalla.setTextColor(ST7735_WHITE);
+        pantalla.setCursor(10, posY + 2);
+        pantalla.print(editMode ? "* " : "> ");
+      } else {
+        pantalla.fillRect(6, posY - 2, 148, 15, ST77XX_BLACK);
+        pantalla.setTextColor(ST77XX_DARKGREY);
+        pantalla.setCursor(10, posY + 2);
+        pantalla.print("  ");
+      }
+
+      if (i == 0) {
+        pantalla.print(editMode ? "Girando: Cambia Tono" : "Editar Color");
+      } else {
+        pantalla.print(">> GUARDAR Y VOLVER <<");
+      }
+    }
+  }
 }
 
 void setup() {
@@ -409,6 +557,8 @@ void setup() {
   pinMode(ENC_DT, INPUT_PULLUP);
   pinMode(ENC_SW, INPUT_PULLUP); 
   pinMode(rele, OUTPUT);
+  pinMode(humid, OUTPUT); 
+  pinMode(buzzer, OUTPUT);
   digitalWrite(rele,LOW); 
 
   // Leemos el estado inicial de reposo de CLK (casi siempre HIGH)
@@ -434,6 +584,11 @@ void setup() {
   //empezar prtocolo I2C
   Wire.begin(I2C_SDA, I2C_SCL);
 
+  //EMPEZAR PROTOCOLO TIRA LED
+  tiraLed.begin();
+  tiraLed.setBrightness(60); 
+  tiraLed.show(); //APAGA TODO LOS LEDS AL ARRANCAR 
+
   
 
   pantalla.initR(INITR_BLACKTAB); 
@@ -448,6 +603,9 @@ void setup() {
   ledcSetup(1,25000,8); //pwm ventilador para sacar el aire
   ledcAttachPin(fan2PWM,1);
   ledcWrite(1,0);
+  ledcSetup(2,20000,8); //PWM para el sonido del buzzer 
+  ledcAttachPin(buzzer, 2);
+  ledcWrite(2,0); 
 
 // INICIALIZACIÓN BME280
   if (!bme.begin(0x76, &Wire)) {
@@ -456,7 +614,7 @@ void setup() {
     Serial.println("[OK] BME280 inicializado en 0x76.");
 
     // Configuración explícita de registros internos recomendada por Bosch
-    bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+    bme.setSampling(Adafruit_BME280::MODE_FORCED,
                     Adafruit_BME280::SAMPLING_X2,
                     Adafruit_BME280::SAMPLING_X1,
                     Adafruit_BME280::SAMPLING_X1,
@@ -475,19 +633,72 @@ void loop() {
   if (currentTemp != lastTemp){
     lastTemp = currentTemp; 
   }
+  if (currentHumid != lastHumid){
+    lastHumid = currentHumid; 
+  }
+
+
+  if (currentState == PROGRAM_DONE){
+
+    digitalWrite(rele, LOW);
+    digitalWrite(humid, LOW);
+    ledcWrite(0, 0); //APAGAR VENTILADORES AL ACABAR
+    ledcWrite(1, 0); 
+    if (millis()- ultimaAlarma >= tiempoAlarma){
+      ultimaAlarma = millis(); 
+      alarmaOn= !alarmaOn; 
+    }
+
+    if (alarmaOn){
+      Serial.println("[ALARMA] Sonando...");
+      for (int i = 50; i <255 ; i++){
+        ledcWrite(2,i); 
+      }
+      
+    } else {
+      ledcWrite(2,0); 
+      Serial.println("[ALARMA] Silenciada...");
+    }
+  }
 
   leerEncoder();
   botonPresionado();
 
   //FUNCION PARA HACER ROTAR LAS IMAGENES SIN BLOQUEAR AL PROCESADOR
   if (currentState == RUNNING_AUTO){
+
+    // 1. CALCULO GLOBAL CONTINUO DE TIEMPO RESTANTE
+    uint32_t totalSegundosGoal = ((uint32_t)diasGoal * 86400UL) + 
+                                 ((uint32_t)horasGoal * 3600UL) + 
+                                 ((uint32_t)minutosGoal * 60UL); 
+
+    uint32_t segundosTranscurridos = (millis() - startTimeIncubation) / 1000UL;
+    
+    if (segundosTranscurridos >= totalSegundosGoal) {
+      segRestantes = 0;
+    } else {
+      segRestantes = totalSegundosGoal - segundosTranscurridos;
+    }
+
+    //VERIFICAR SI EL TIEMPO SELECCIONADO YA TERMINO 
+  if (segRestantes <= 0 && currentState == RUNNING_AUTO){
+    currentState = PROGRAM_DONE; 
+    alarmaOn = true; 
+    ultimaAlarma = millis(); 
+    ledcWrite(2,200); 
+    pantalla.fillScreen(ST7735_BLACK);
+    actualizarMenu(); // Dibuja la pantalla final UNA SOLA VEZ
+  }
+
     manejarCalor(potenciaCalor);
+    manejarHumedad(potenciaHumedad);
     if (millis() - lastAutoScreenSwitch >= AUTO_SCREEN_INTERVAL){
       //SI YA PASARON 4 SEGUNDOS
       lastAutoScreenSwitch = millis();
       autoScreenPage = (autoScreenPage +1) % 3;
       actualizarMenu();
       calcularPWMTemp(tempGoal);
+      calcularPWMHumedad(humidGoal);
     } 
   }
 
@@ -499,25 +710,55 @@ void loop() {
     float tempOneWire = ds18b20.getTempCByIndex(0); //TRAER LA PRIMERA TEMPERATURA DEL PRIMER SENSOR EN EL BUS
     ds18b20.requestTemperatures(); //DECIR AL BUS QUE VAS A PREGUNTAR POR TEMPERATURA
     
-    //LECTURA TEMPERATURA Y HUMEDAD
-    float tempBME280 = bme.readTemperature(); //TEMP en CELCIUS
-    currentHumid = bme.readHumidity(); //humedad en porcentaje
+    // 2. Disparar medición forzada en BME280 y leer
+    bme.takeForcedMeasurement(); // Despierta el sensor, mide y vuelve a reposo
+    float tempBME280 = bme.readTemperature();
+    float humBME280  = bme.readHumidity();
 
     bool oneWireValido = (tempOneWire != DEVICE_DISCONNECTED_C && tempOneWire > -50.0);
-    bool BMEValido = !isnan(tempBME280);
+    bool BMEFuncionando = (!isnan(tempBME280) && tempBME280 > -40.0 && humBME280 >= 0.0);
+
+
+    static int fallasConsecutivas = 0; 
+    bool coherenciaBME = false; 
+
+    if (oneWireValido && BMEFuncionando){ //AMBOS ESTAN MANDANDO SENAL
+      float diferencia = abs (tempOneWire - tempBME280); 
+        if (diferencia <= 2.5){
+          coherenciaBME = true; 
+          fallasConsecutivas = 0;
+        } else {
+          coherenciaBME = false; 
+          fallasConsecutivas++; 
+          Serial.printf("[ALERTA] Desvío térmico detectado: DS18B20=%.2f C vs BME=%.2f C (Dif: %.2f C)\n", 
+                      tempOneWire, tempBME280, diferencia);
+        }
+    } else if (BMEFuncionando){
+        coherenciaBME = true; //SI NO FUNCIONA EL ONEWIRE
+    }
+     
+    if (fallasConsecutivas >=2){
+      reiniciarBME280();
+      fallasConsecutivas = 0; 
+    }
+    if (BMEFuncionando && coherenciaBME){
+      currentHumid = (int)humBME280; 
+    } else {
+      currentHumid = lastHumid;
+    }
 
     //CASO 1 AMBOS SENSORE FUNCIONAN
-    if (oneWireValido && BMEValido){
+    if (oneWireValido && coherenciaBME){
       sensores = 0; // CASO 0 = TODO FUNCIONA  esta variable se va a usar cuando se vea la temp
       currentTemp = ((tempOneWire + tempBME280)/2);
     }
     //CASO 2 SENSOR HUMEDAD Y TEMP FUNCIONA
-    else if (!oneWireValido && BMEValido){
+    else if (!oneWireValido && coherenciaBME){
       sensores = 1; // CASO 1 = FUNCIONA SOLO HUMEDAD Y TEMPERATURA
       currentTemp = tempBME280; 
     }
     //CASO 3 SENSOR ONEWIRE FUNCIONA SOLO
-    else if (oneWireValido && !BMEValido){
+    else if (oneWireValido && !coherenciaBME){
       sensores = 2; //CASO 2 = FUNCIONA SOLO ONEWIRE
       currentTemp = tempOneWire;
     }
@@ -639,6 +880,26 @@ void leerEncoder() {
           }
         }
       }
+      else if (currentState == MODIFY_COLOR){
+        if (!editMode) {
+          // Cambiar entre "Editar Color" (0) y "Guardar y Volver" (1)
+          if (giroHorario && selectedItem < 1) selectedItem++;
+          else if (!giroHorario && selectedItem > 0) selectedItem--;
+        } else {
+          // Cambiar el tono del color y actualizar la tira en vivo
+          if (giroHorario) {
+            colorLedsIndex = (colorLedsIndex + 1) % TOTAL_COLORES;
+          } else {
+            colorLedsIndex = (colorLedsIndex - 1 + TOTAL_COLORES) % TOTAL_COLORES;
+          }
+
+          // Reflejo en tiempo real en la tira de LEDs
+          for (int p = 0; p < 32; p++) {
+            tiraLed.setPixelColor(p, tablaColoresNeo[colorLedsIndex]);
+          }
+          tiraLed.show();
+        }
+      }
       actualizarMenu();
   }
 }
@@ -691,7 +952,7 @@ void botonPresionado (){
       if (currentState == MODIFY_PROGRAM){
 
         //opcion para iniciar el programa
-        if (selectedItem == 4){
+        if (selectedItem == 5){
             currentState = RUNNING_AUTO; 
             editMode = false; 
             startTimeIncubation = millis(); 
@@ -708,7 +969,13 @@ void botonPresionado (){
             pantalla.fillScreen(ST7735_BLACK);
             actualizarMenu();
         
-        } else {
+        } else if(selectedItem == 4){
+            currentState = MODIFY_COLOR; 
+            editMode = false; 
+            pantalla.fillScreen(ST7735_BLACK);
+            actualizarMenu(); 
+        }
+         else {
           editMode = !editMode; 
           actualizarMenu ();
         }
@@ -745,6 +1012,27 @@ void botonPresionado (){
           editMode=!editMode; 
           actualizarMenu ();
         }
+      }
+      else if (currentState == PROGRAM_DONE){
+        alarmaOn = false;
+        ledcWrite(2, 0); // Apagar buzzer por completo
+        currentState = MENU_SELECT;
+        selectedItem = 0;
+        pantalla.fillScreen(ST7735_BLACK);
+        actualizarMenu();
+      }
+
+      else if (currentState == MODIFY_COLOR) {
+        if (selectedItem == 0) {
+          editMode = !editMode; // Entra o sale de la edición del tono
+        } else if (selectedItem == 1) {
+          // Guardar y volver a MODIFY_PROGRAM
+          editMode = false;
+          selectedItem = 4; // Apunta de nuevo sobre la opción "Color Iluminacion"
+          currentState = MODIFY_PROGRAM;
+          pantalla.fillScreen(ST7735_BLACK);
+        }
+        actualizarMenu();
       }
     }
     }
@@ -911,4 +1199,84 @@ void manejarCalor (float PWMgenerado){
   } else {
     digitalWrite(rele, LOW);
   }
+}
+
+void calcularPWMHumedad (int humedadMeta){
+  potenciaHumedad = 0;
+  int diferencia = (humedadMeta) - currentHumid; 
+
+  if (diferencia > 0){ //NECESITA HUMEDAD
+     if (diferencia >= 10 ){
+      potenciaHumedad = 100;
+    } 
+    else if (diferencia < 10 && diferencia >= 7){
+      potenciaHumedad = 70;
+    }
+    else if (diferencia < 7 && diferencia >= 4){
+      potenciaHumedad = 40;
+    }
+    else if (diferencia < 4 && diferencia >= 2){
+      potenciaHumedad = 20;
+    }
+    else  if (diferencia == 1){ //RANGO DE TOLERANCIA
+      potenciaHumedad = 0;
+    }
+
+  } else { //SE NECESITA SACAR HUMEDAD 
+    diferencia = abs(diferencia); 
+     if (diferencia >= 10 ){
+      ledcWrite(1,128); //VENTILADOR EXTRACTOR AL 50%
+    } 
+    else if (diferencia < 10 && diferencia >= 7){
+      ledcWrite(1, 90);
+    }
+    else if (diferencia < 7 && diferencia >= 4){
+      ledcWrite(1,64);
+    }
+    else if (diferencia < 4 && diferencia >= 2){
+      ledcWrite(1,39);
+    }
+    else  if (diferencia == 1){ //RANGO DE TOLERANCIA
+      ledcWrite(1,0);
+    }
+  }
+}
+
+void manejarHumedad (int PWMHumedad){
+  unsigned long tiempoActual = millis();
+  if (tiempoActual - empiezaConteo >= tiempoMaximo){
+    empiezaConteo = tiempoActual; }
+
+  unsigned long tiempoEncendido = (unsigned long)((PWMHumedad/100)* tiempoMaximo);
+
+  if (PWMHumedad > 0 && (tiempoActual - empiezaConteo) < tiempoEncendido){
+    digitalWrite(humid, HIGH);
+  } else {
+    digitalWrite(humid, LOW);
+  }
+}
+
+void reiniciarBME280(){
+  Serial.println("[RECUPERACIÓN] Reinicializando bus I2C y BME280 por desvío térmico...");
+
+  // 1. Reset por software
+  Wire.beginTransmission(0x76);
+  Wire.write(0xE0);
+  Wire.write(0xB6);
+  Wire.endTransmission();
+  delay(50); // Tiempo para que el chip recargue la NVM de fábrica
+
+  // 2. Reabrir bus e inicializar librería
+  Wire.begin(I2C_SDA, I2C_SCL);
+  if (bme.begin(0x76, &Wire)) {
+    bme.setSampling(Adafruit_BME280::MODE_FORCED,     // Modo Forzado: solo mide cuando se le pide
+                    Adafruit_BME280::SAMPLING_X2,    // Temp 2x
+                    Adafruit_BME280::SAMPLING_X1,    // Presión 1x
+                    Adafruit_BME280::SAMPLING_X2,    // Humedad 2x
+                    Adafruit_BME280::FILTER_X4);     // Filtro IIR
+    Serial.println("[OK] BME280 reconfigurado y calibrado exitosamente.");
+  } else {
+    Serial.println("[ERROR] No se pudo recuperar el BME280 en el bus.");
+  }
+
 }
