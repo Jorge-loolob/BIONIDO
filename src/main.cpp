@@ -21,13 +21,32 @@
 #define servo   13
 #define humid   5
 #define buzzer  4
-//PANTALLA Y ENCODER
+
+//PANTALLA 
 #define TFT_CS    15
 #define TFT_RST    2
 #define TFT_DC    12
-#define ENC_CLK   25
-#define ENC_DT    33
+
+//ENCODER
+#define ENC_CLK   34  //RECABLEAR
+#define ENC_DT    35 //recablear
 #define ENC_SW    32
+
+//SPI MAX
+#define MAX_CLK   25  // Pin liberado del encoder
+#define MAX_DIN   33  // Pin liberado del encoder
+#define MAX_CS    19  // Se queda en el pin 19
+
+#define MAX7219_REG_NOOP   0x00
+#define MAX7219_REG_DIG0   0x01
+#define MAX7219_REG_DIG1   0x02
+#define MAX7219_REG_DIG2   0x03
+#define MAX7219_REG_DIG3   0x04
+#define MAX7219_REG_DECODE 0x09
+#define MAX7219_REG_INTENS 0x0A
+#define MAX7219_REG_SCAN   0x0B
+#define MAX7219_REG_SHUTDN 0x0C
+#define MAX7219_REG_TEST   0x0F
 
 //INTERRUPCIONES
 volatile int8_t pasosEncoder = 0 ; // pasos para procesar en la funcion
@@ -72,6 +91,9 @@ void manejarCalor (float PWMgenerado);
 void calcularPWMHumedad (int humedadMeta);
 void manejarHumedad (int PWMHumedad);  
 void reiniciarBME280(); 
+void mostrarTemperatura(float temp); 
+void enviarMAX7219(uint8_t registro, uint8_t valor);
+void initMAX7219 ();  
 
 
 //DEFINIR COLORES PARA LEDS: 
@@ -553,8 +575,8 @@ void actualizarMenu (){
 }
 
 void setup() {
-  pinMode(ENC_CLK, INPUT_PULLUP);
-  pinMode(ENC_DT, INPUT_PULLUP);
+  pinMode(ENC_CLK, INPUT);
+  pinMode(ENC_DT, INPUT);
   pinMode(ENC_SW, INPUT_PULLUP); 
   pinMode(rele, OUTPUT);
   pinMode(humid, OUTPUT); 
@@ -589,7 +611,6 @@ void setup() {
   tiraLed.setBrightness(60); 
   tiraLed.show(); //APAGA TODO LOS LEDS AL ARRANCAR 
 
-  
 
   pantalla.initR(INITR_BLACKTAB); 
   pantalla.setRotation(1); 
@@ -603,9 +624,13 @@ void setup() {
   ledcSetup(1,25000,8); //pwm ventilador para sacar el aire
   ledcAttachPin(fan2PWM,1);
   ledcWrite(1,0);
-  ledcSetup(2,20000,8); //PWM para el sonido del buzzer 
+  ledcSetup(2,2700,8); //PWM para el sonido del buzzer 
   ledcAttachPin(buzzer, 2);
   ledcWrite(2,0); 
+
+  
+  initMAX7219(); 
+  mostrarTemperatura(0.0); 
 
 // INICIALIZACIÓN BME280
   if (!bme.begin(0x76, &Wire)) {
@@ -767,6 +792,8 @@ void loop() {
       sensores = 3; // NADA FUNCIONA PARAR EL CALENTAMIENTO Y SACAR AIRE 
       currentTemp = lastTemp; 
     }
+
+    mostrarTemperatura(currentTemp); 
   }
   
 }
@@ -988,6 +1015,7 @@ void botonPresionado (){
           ledcWrite (0, 0); //apagar ventiladores
           ledcWrite (1,0);
           digitalWrite(rele, LOW);//apagar rele 
+          digitalWrite(humid,LOW); //APAGAR humidificador 
           pantalla.fillScreen(ST7735_BLACK);
           actualizarMenu();
         }
@@ -1280,3 +1308,151 @@ void reiniciarBME280(){
   }
 
 }
+
+// ==========================================
+// BIT-BANGING ROBUSTO CON REACTIVACIÓN DE HARDWARE SPI
+// ==========================================
+void bitBangByte(uint8_t data) {
+  for (int i = 7; i >= 0; i--) {
+    digitalWrite(MAX_CLK, LOW);
+    digitalWrite(MAX_DIN, (data & (1 << i)) ? HIGH : LOW);
+    delayMicroseconds(1);
+    
+    digitalWrite(MAX_CLK, HIGH);
+    delayMicroseconds(1);
+  }
+  digitalWrite(MAX_CLK, LOW);
+}
+
+void enviarMAX7219(uint8_t registro, uint8_t valor) {
+  // 2. Bajar CS del MAX7219 para iniciar trama
+  digitalWrite(MAX_CS, LOW);
+  delayMicroseconds(1);
+
+  // 3. Enviar los dos bytes a mano
+  bitBangByte(registro);
+  bitBangByte(valor);
+
+  // 4. Subir CS para fijar el dato (Latch)
+  digitalWrite(MAX_CS, HIGH);
+  delayMicroseconds(1);
+
+  // 5. Dejar líneas de bus en reposo
+  digitalWrite(MAX_CLK, LOW);
+  digitalWrite(MAX_DIN, LOW);
+}
+
+void initMAX7219() {
+  pinMode(MAX_CS, OUTPUT);
+  pinMode(MAX_CLK, OUTPUT);
+  pinMode(MAX_DIN, OUTPUT);
+  
+  digitalWrite(MAX_CS, HIGH);
+  digitalWrite(MAX_CLK, LOW);
+  digitalWrite(MAX_DIN, LOW);
+
+  delay(50);
+  enviarMAX7219(MAX7219_REG_TEST, 0x00);    // Modo prueba apagado
+  enviarMAX7219(MAX7219_REG_SCAN, 0x03);    // 4 dígitos habilitados (0 a 3)
+  enviarMAX7219(MAX7219_REG_DECODE, 0x0F);  // Code B en los 4 dígitos
+  enviarMAX7219(MAX7219_REG_INTENS, 0x07);  // Brillo medio
+  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01);  // Encender
+}
+
+void mostrarTemperatura(float temp) {
+  // Asegurar que la pantalla TFT no escuche
+  digitalWrite(TFT_CS, HIGH);
+
+  // Enviar configuración segura de recuperación
+  enviarMAX7219(MAX7219_REG_TEST, 0x00);   
+  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01); 
+  enviarMAX7219(MAX7219_REG_DECODE, 0x0F); 
+
+  if (temp < -9.9 || temp > 99.9) {
+    enviarMAX7219(MAX7219_REG_DIG0, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG1, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG2, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG3, 0x0F); // Blanco
+    return;
+  }
+
+  int valorEntero = (int)(temp * 10.0 + 0.5); 
+  int decena  = (valorEntero / 100) % 10;
+  int unidad  = (valorEntero / 10) % 10; 
+  int decima  = valorEntero % 10; 
+
+  enviarMAX7219(MAX7219_REG_DIG0, (decena > 0) ? decena : 0x0F);
+  enviarMAX7219(MAX7219_REG_DIG1, unidad | 0x80); // Punto decimal
+  enviarMAX7219(MAX7219_REG_DIG2, decima);
+  enviarMAX7219(MAX7219_REG_DIG3, 0x0F);
+}
+
+/*
+void enviarMAX7219(uint8_t registro, uint8_t valor){
+  // apagar la transmision de la pantalla 
+  digitalWrite(TFT_CS, HIGH);
+  digitalWrite(TFT_CS, HIGH); 
+
+  digitalWrite( SPI_CS, HIGH); 
+  delayMicroseconds(2); 
+
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+
+  digitalWrite(SPI_CS, LOW); 
+  delayMicroseconds(2); 
+
+  SPI.transfer(registro); 
+  SPI.transfer(valor); 
+
+  delayMicroseconds(2); 
+  digitalWrite(SPI_CS, HIGH); 
+  delayMicroseconds(2); 
+
+  SPI.endTransaction(); 
+
+  digitalWrite(TFT_CS, HIGH);
+  delayMicroseconds(1);
+
+}
+
+void initMAX7219 (){
+  pinMode(SPI_CS, OUTPUT); 
+  digitalWrite(SPI_CS, HIGH);
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH); 
+
+  delay (100); 
+  enviarMAX7219(MAX7219_REG_TEST, 0x00); //APAGADO EN MODO PRUEBA
+  enviarMAX7219(MAX7219_REG_SHUTDN, 0x00);
+  delay (10); 
+  enviarMAX7219(MAX7219_REG_SCAN, 0x03);    // Habilitar 4 dígitos (DIG_0 a DIG_3)
+  enviarMAX7219(MAX7219_REG_DECODE, 0x07);  // Activar Code B en los 4 dígitos (0 a 3)
+  enviarMAX7219(MAX7219_REG_INTENS, 0x08);  // Brillo medio (0x00 a 0x0F)
+  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01);  // Salir de standby / Encender
+}
+
+void mostrarTemperatura(float temp){
+
+  enviarMAX7219(MAX7219_REG_TEST, 0x00); 
+  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01); 
+  enviarMAX7219(MAX7219_REG_DECODE, 0x07); // Asegura decodificación Code B
+
+  if (temp < -9.9 || temp > 99.9){
+    enviarMAX7219(MAX7219_REG_DIG0, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG1, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG2, 0x0A); // '-'
+    enviarMAX7219(MAX7219_REG_DIG3, 0x0F); // Blanco
+    return;
+  }
+  int valorEntero = (int)((temp * 10) + 0.5); 
+  int decena = (valorEntero/100) % 10;
+  int unidad = (valorEntero/10) % 10; 
+  int decima = (valorEntero) % 10; 
+
+  // ENVIAR DIGITOS
+  enviarMAX7219(MAX7219_REG_DIG0, (decena > 0) ? decena : 0x0F); //0x0F es NADA EN EL DISPLAY
+  enviarMAX7219(MAX7219_REG_DIG1, unidad | 0x80 ); //AGREGAR AL BINARIO EL PUNTO DECIMAL EN MSB
+  enviarMAX7219(MAX7219_REG_DIG2, decima); 
+  enviarMAX7219(MAX7219_REG_DIG3, 0x4E); // UNA C de CELCIUS  
+}
+  */
