@@ -146,7 +146,7 @@ const char* opcionesProgramas [OPCIONES_PROGRAMA] = {
   "Humedad: ",
   "Tiempo: ",
   "Motor: ",
-  "Color Iluminacion",
+  "Iluminacion",
   ">> CONFIRMAR <<"
 };
 
@@ -183,6 +183,12 @@ const uint32_t tablaColoresNeo[TOTAL_COLORES] = {
   COLOR_ROJO,
   COLOR_APAGADO
 };
+
+//MODIFICAR VALORES DE BRILLO 
+const int TOTAL_NIVELES_BRILLO = 10; 
+const int nivelesBrillo[TOTAL_NIVELES_BRILLO]={10, 20, 30, 40, 50, 60, 70, 80, 90, 100}; 
+int brilloIndex = 3; 
+int brilloLedActual = 40; 
 
 //CONTADOR PARA DESPLAZAR EL SCROLL 
 int selectedItem = 0; 
@@ -322,8 +328,6 @@ void actualizarMenu (){
         pantalla.printf("%dd %02dh %02dm", diasGoal, horasGoal, minutosGoal);
       } else if (i == 3) {
         pantalla.print(motorON ? "ON " : "OFF");
-      }else if (i == 4) {
-        pantalla.print(nombresColores[colorLedsIndex]);
       }
     }
   } else if (currentState == RUNNING_AUTO){
@@ -554,42 +558,47 @@ void actualizarMenu (){
     pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
     pantalla.setCursor(26, 6);
     pantalla.print("ILUMINACION LED");
-    pantalla.drawFastHLine(0, 18, 160, ST77XX_DARKGREY);
+    pantalla.drawFastHLine(0, 14, 160, ST77XX_DARKGREY);
 
-    // 2. Recuadro gráfico con el color seleccionado
-    pantalla.drawRect(28, 26, 104, 26, ST7735_WHITE);
-    pantalla.fillRect(30, 28, 100, 22, coloresTFT[colorLedsIndex]);
+    // 2. Muestra de color (Recuadro gráfico)
+    pantalla.drawRect(10, 18, 140, 18, ST7735_WHITE);
+    pantalla.fillRect(12, 20, 136, 14, coloresTFT[colorLedsIndex]);
 
-    // 3. Nombre del color centrado debajo de la muestra
-    pantalla.fillRect(0, 58, 160, 12, ST7735_BLACK); // Limpia solo el renglón del texto
-    pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
-    pantalla.setTextSize(1);
-    pantalla.setCursor(20, 60);
-    pantalla.printf("Color: %s", nombresColores[colorLedsIndex]);
+    // 3. Barra gráfica de brillo (Debajo del recuadro de color)
+    int anchoBarra = map(brilloLedActual, 0, 100, 0, 136); // Mapeo de 0 a 100% al ancho en píxeles
+    pantalla.drawRect(10, 39, 140, 8, ST77XX_DARKGREY);
+    pantalla.fillRect(12, 41, 136, 4, ST7735_BLACK); // Limpiar fondo de barra
+    pantalla.fillRect(12, 41, anchoBarra, 4, ST7735_YELLOW); // Relleno de nivel de brillo
 
-    pantalla.drawFastHLine(0, 78, 160, ST77XX_DARKGREY);
+    pantalla.drawFastHLine(0, 51, 160, ST77XX_DARKGREY);
 
     // 4. Opciones inferiores (0: Modificar Color, 1: Volver)
-    for (int i = 0; i < 2; i++) {
-      int posY = 86 + (i * 18); // 86 y 104
+    for (int i = 0; i < 3; i++) {
+      int posY = 56 + (i * 18); // 86 y 104
 
       if (i == selectedItem) {
         uint16_t colorFondo = editMode ? ST7735_ORANGE : ST7735_BLUE;
-        pantalla.fillRect(6, posY - 2, 148, 15, colorFondo);
+        pantalla.fillRect(4, posY - 2, 152, 15, colorFondo);
         pantalla.setTextColor(ST7735_WHITE);
-        pantalla.setCursor(10, posY + 2);
+        pantalla.setCursor(8, posY + 2);
         pantalla.print(editMode ? "* " : "> ");
       } else {
-        pantalla.fillRect(6, posY - 2, 148, 15, ST77XX_BLACK);
+        pantalla.fillRect(4, posY - 2, 152, 15, ST7735_BLACK);
         pantalla.setTextColor(ST77XX_DARKGREY);
-        pantalla.setCursor(10, posY + 2);
+        pantalla.setCursor(8, posY + 2);
         pantalla.print("  ");
       }
 
       if (i == 0) {
         pantalla.print(editMode ? "Girando: Cambia Tono" : "Editar Color");
-      } else {
-        pantalla.print(">> GUARDAR Y VOLVER <<");
+      } 
+      else if (i == 1){
+        pantalla.print("Brillo: "); 
+        pantalla.print(brilloLedActual); 
+        pantalla.print("%"); 
+      } 
+      else if ( i == 2 ){
+        pantalla.print(">> GUARDAR Y VOLVER <<"); 
       }
     }
   } else if (currentState == PantallaFalla){
@@ -661,7 +670,7 @@ void setup() {
 
   //EMPEZAR PROTOCOLO TIRA LED
   tiraLed.begin();
-  tiraLed.setBrightness(100); 
+  tiraLed.setBrightness(map(brilloLedActual, 0, 100, 0, 255)); 
   aplicarColorLEDs();  
 
 
@@ -785,7 +794,7 @@ void loop() {
       aplicarColorLEDs(); 
       ultimoEncendidoLed = millis(); 
     } else if (movimientoEncoder){
-      tiraLed.setBrightness (100);  // AJUSTAR BRILLO EN MENU Y PODER PONER LA VARIABLE AQUI  
+      tiraLed.setBrightness (map(brilloLedActual,0,100,0,255));  // AJUSTAR BRILLO EN MENU Y PODER PONER LA VARIABLE AQUI  
       aplicarColorLEDs(); 
     }
   }
@@ -986,24 +995,36 @@ void leerEncoder() {
           }
         }
       }
-        else if (currentState == MODIFY_COLOR){
+      else if (currentState == MODIFY_COLOR) {
         if (!editMode) {
-          // Cambiar entre "Editar Color" (0) y "Guardar y Volver" (1)
-          if (giroHorario && selectedItem < 1) selectedItem++;
+          // Desplazarse entre: 0 (Color), 1 (Brillo) y 2 (Guardar y Volver)
+          if (giroHorario && selectedItem < 2) selectedItem++;
           else if (!giroHorario && selectedItem > 0) selectedItem--;
         } else {
-          // Cambiar el tono del color y actualizar la tira en vivo
-          if (giroHorario) {
-            colorLedsIndex = (colorLedsIndex + 1) % TOTAL_COLORES;
-          } else {
-            colorLedsIndex = (colorLedsIndex - 1 + TOTAL_COLORES) % TOTAL_COLORES;
+          // OPCIÓN 0: Cambiar el tono del color
+          if (selectedItem == 0) {
+            if (giroHorario) {
+              colorLedsIndex = (colorLedsIndex + 1) % TOTAL_COLORES;
+            } else {
+              colorLedsIndex = (colorLedsIndex - 1 + TOTAL_COLORES) % TOTAL_COLORES;
+            }
+          } 
+          // OPCIÓN 1: Cambiar el nivel de brillo (Preset)
+          else if (selectedItem == 1) {
+            if (giroHorario && brilloIndex < TOTAL_NIVELES_BRILLO - 1) {
+              brilloIndex++;
+            } else if (!giroHorario && brilloIndex > 0) {
+              brilloIndex--;
+            }
+            brilloLedActual = nivelesBrillo[brilloIndex]; // Actualiza el % (ej. 20, 40, 60...)
+            
+            // Mapeo de Porcentaje (0-100) a valor de hardware NeoPixel (0-255)
+            uint8_t brilloHardware = map(brilloLedActual, 0, 100, 0, 255);
+            tiraLed.setBrightness(brilloHardware);
           }
 
-          // Reflejo en tiempo real en la tira de LEDs
-          for (int p = 0; p < 64; p++) {
-            tiraLed.setPixelColor(p, tablaColoresNeo[colorLedsIndex]);
-          }
-          tiraLed.show();
+          // Reflejar cambios de color y brillo en tiempo real
+          aplicarColorLEDs();
         }
       }
       actualizarMenu();
@@ -1132,9 +1153,9 @@ void botonPresionado (){
       }
 
       else if (currentState == MODIFY_COLOR) {
-        if (selectedItem == 0) {
+        if (selectedItem == 0 || selectedItem == 1) {
           editMode = !editMode; // Entra o sale de la edición del tono
-        } else if (selectedItem == 1) {
+        } else if (selectedItem == 2) {
           // Guardar y volver a MODIFY_PROGRAM
           editMode = false;
           selectedItem = 4; // Apunta de nuevo sobre la opción "Color Iluminacion"
@@ -1335,6 +1356,12 @@ void manejarCalor (float PWMgenerado){
 
 void calcularPWMHumedad (int humedadMeta){
   potenciaHumedad = 0;
+
+  //AGREGAR PRIORIDAD POR TEMPERATURA ANTES QUE HUMEDAD 
+  if ( currentTemp + 1 < tempGoal){
+    ledcWrite(1,0); //APAGAR VENTILADOR EXTRACTOR
+  }
+
   int diferencia = (humedadMeta) - currentHumid; 
 
   if (diferencia > 0){ //NECESITA HUMEDAD
@@ -1355,6 +1382,8 @@ void calcularPWMHumedad (int humedadMeta){
     }
 
   } else { //SE NECESITA SACAR HUMEDAD 
+
+    if (currentTemp >= tempGoal){
     diferencia = abs(diferencia); 
      if (diferencia >= 10 ){
       ledcWrite(1,128); //VENTILADOR EXTRACTOR AL 50%
@@ -1371,6 +1400,7 @@ void calcularPWMHumedad (int humedadMeta){
     else  if (diferencia == 1){ //RANGO DE TOLERANCIA
       ledcWrite(1,0);
     }
+  }
   }
 }
 
