@@ -7,6 +7,9 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <Adafruit_NeoPixel.h>
+#include <WiFi.h>
+#include <Callmebot_ESP32.h>
+
 
 #define ST77XX_DARKGREY 0x7BEF
 // Pines
@@ -72,18 +75,17 @@ enum SystemState {
 SystemState currentState = MENU_SELECT; 
 
 enum SystemError {
-    ERR_OK,
-    SENSOR_ERR,
-    ERR_HEAT,
-    ERR_HUMEDAD,
-    ERR_COMMUNICATION_BME,
-    ERR_COMMUNICATION_ONEWIRE
+    SYS_ERR_OK,
+    SYS_SENSOR_ERR,
+    SYS_ERR_HEAT,
+    SYS_ERR_HUMEDAD,
+    SYS_ERR_COMMUNICATION_BME,
+    SYS_ERR_COMMUNICATION_ONEWIRE
 };
 
 //PROTOTIPOS
 void actualizarMenu();
 void leerEncoder();
-SystemError verification();
 void botonPresionado (); 
 void programaGallina ();
 void programaReptiles ();
@@ -184,6 +186,12 @@ const uint32_t tablaColoresNeo[TOTAL_COLORES] = {
   COLOR_APAGADO
 };
 
+//INTERNET 
+const char* redWifi = "floreyes_2.4AP2";
+const char* contrasena = "Fl0r35R3y35"; 
+String numeroTelefono = "+5219995870390"; 
+String ApiKey = "4123361";
+
 //MODIFICAR VALORES DE BRILLO 
 const int TOTAL_NIVELES_BRILLO = 10; 
 const int nivelesBrillo[TOTAL_NIVELES_BRILLO]={10, 20, 30, 40, 50, 60, 70, 80, 90, 100}; 
@@ -222,7 +230,7 @@ int vecesEncendidasResistencia = 0;
 const char* mensajeFalla = "ERROR DESCONOCIDO";
 bool movimientoEncoder = false; 
 unsigned long ultimoEncendidoLed = 0; 
-
+bool conexionWifi = false; 
 
 //VARIABLES PARA SONAR ALARMA 
 bool alarmaOn = false; //FLAG PARA HACER QUE SEA INTERNMITENTE LA ALARMA 
@@ -655,6 +663,10 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_CLK), isrEncoder, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_DT),isrEncoder, CHANGE); 
 
+  //INICIAR WIFI
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(redWifi,contrasena);
+
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n=== SISTEMA DE MONITOREO DE TEMPERATURA LISTO ===");
@@ -709,6 +721,23 @@ void setup() {
                     Adafruit_BME280::STANDBY_MS_1000);
   }
 
+  if(WiFi.status() != WL_CONNECTED){
+    Serial.print("intentando conectar a wifi");
+      for (int i = 0; i<3 ; i++){
+        delay (500);
+        Serial.print(".");
+    }
+    if (WiFi.status() != WL_CONNECTED){
+    Serial.print("NO SE PUDO CONECTAR A WIFI INTENTANDO MAS TARDE");
+    conexionWifi = false; 
+    }
+  } else {
+    conexionWifi = true; 
+    Serial.print("Wifi CONECTADO. Direccion IP:");
+    Serial.print(WiFi.localIP()); 
+  }
+
+
   Serial.printf("[OK] Sensores DS18B20 encontrados: %d\n", ds18b20.getDeviceCount());
   Serial.println("=================================================\n");
 }
@@ -736,6 +765,7 @@ void loop() {
     digitalWrite(humid, LOW);
     ledcWrite(0, 0); //APAGAR VENTILADORES AL ACABAR
     ledcWrite(1, 0); 
+
     if (millis()- ultimaAlarma >= tiempoAlarma){
       ultimaAlarma = millis(); 
       alarmaOn= !alarmaOn; 
@@ -772,6 +802,21 @@ void loop() {
     //VERIFICAR SI EL TIEMPO SELECCIONADO YA TERMINO 
   if (segRestantes <= 0 && currentState == RUNNING_AUTO){
     currentState = PROGRAM_DONE; 
+
+    //CREAR MENSAJE A ENVIAR 
+    char bufferMensaje [200]; 
+    snprintf(bufferMensaje, sizeof(bufferMensaje),
+      "Programa Finalizado Exitosamente\n"
+      "Temperatura Final : %.1f C (Objetivo: %.1f C)\n"
+      "Humedad Final     : %d %% (Objetivo: %d %%)\n"
+      "Duracion          : %dd %02dh %02dm\n",
+      currentTemp, tempGoal, currentHumid, humidGoal, 
+      diasGoal, horasGoal, minutosGoal 
+    );
+
+    String mensajeFinalizacion = String(bufferMensaje); 
+    Callmebot.whatsappMessage(numeroTelefono, ApiKey, mensajeFinalizacion); 
+
     alarmaOn = true; 
     ultimaAlarma = millis(); 
     ledcWrite(2,200); 
@@ -822,7 +867,7 @@ void loop() {
     float humBME280  = bme.readHumidity();
 
     bool oneWireValido = (tempOneWire != DEVICE_DISCONNECTED_C && tempOneWire > -50.0);
-    bool BMEFuncionando = (!isnan(tempBME280) && tempBME280 > -40.0 && humBME280 >= 0.0);
+    bool BMEFuncionando = (!isnan(tempBME280) && tempBME280 > -40.0 && humBME280 >= 0.0 && tempBME280 < 150.0 && humBME280 < 90);
 
 
     static int fallasConsecutivas = 0; 
@@ -883,6 +928,15 @@ void loop() {
     SystemError error = verificarSistema();
     manejarErrores(error);  
   }
+
+  if (!conexionWifi){
+    WiFi.reconnect();
+    delay (50); 
+    if (WiFi.status() == WL_CONNECTED){
+      conexionWifi = true; 
+    } else { conexionWifi = false; }
+  }
+
   movimientoEncoder = false; 
 }
 
@@ -1029,12 +1083,6 @@ void leerEncoder() {
       }
       actualizarMenu();
   }
-}
-
-//FUNCION PARA VERIFICAR SI TODO ANDA BIEN 
-SystemError verification () {
-  
-  return ERR_OK; 
 }
 
 void botonPresionado (){
@@ -1567,35 +1615,49 @@ if (currentState ==RUNNING_AUTO && potenciaCalor >0 ){
     if ((currentTemp - lastTemp) <= 0){ //temperatura NO SUBE CORRECTAMENTE
       vecesRevisada++; 
       if (vecesRevisada >= 5){
-        return ERR_HEAT; 
+        return SYS_ERR_HEAT; 
       }
     } 
   }
   }
 
   if (falloSensores >= 5){
-    return SENSOR_ERR; 
+    return SYS_SENSOR_ERR; 
   }
 
   Wire.beginTransmission(0x76);
   if (Wire.endTransmission() != 0) {
     Serial.println("[ERROR SISTEMA] Fallo de comunicación I2C con BME280");
-    return ERR_COMMUNICATION_BME;
+    return SYS_ERR_COMMUNICATION_BME;
   }
 
   if (ds18b20.getTempCByIndex(0) == DEVICE_DISCONNECTED_C){
     Serial.println("[ERROR SISTEMA] Fallo de comunicación I2C con ONEWIRE");
-    return ERR_COMMUNICATION_ONEWIRE; 
+    return SYS_ERR_COMMUNICATION_ONEWIRE; 
   }
 
-  return ERR_OK; 
+  return SYS_ERR_OK; 
 }
 
 void manejarErrores (SystemError Error){
 
   switch (Error)
   {
-  case ERR_HEAT:
+  case SYS_ERR_HEAT:{
+
+    //CREAR MENSAJE A ENVIAR 
+    char bufferMensaje [200]; 
+    snprintf(bufferMensaje, sizeof(bufferMensaje),
+      "FALLO CRITICO EN CALEFACCION\n"
+      "REVISA SI LA PUERTA ESTA CERRADA\n"
+      "Temperatura Actual : %.1f C (Objetivo: %.1f C)\n"
+      "Humedad Actual     : %d %% (Objetivo: %d %%)\n",
+      currentTemp, tempGoal, currentHumid, humidGoal 
+    );
+
+    String mensajeFinalizacion = String(bufferMensaje); 
+    Callmebot.whatsappMessage(numeroTelefono, ApiKey, mensajeFinalizacion); 
+
     mensajeFalla = "FALLO RESISTENCIA";
     Serial.print("FALLO EN LA RESITENCIA. VERIFICA QUE LA PUERTA ESTE CERRADA");
     // Apagar actuadores por seguridad
@@ -1607,8 +1669,8 @@ void manejarErrores (SystemError Error){
     pantalla.fillScreen(ST7735_BLACK);
     actualizarMenu();
     break;
-
-  case SENSOR_ERR: { // <-- LLAVE DE APERTURA PARA CREAR SCOPE LOCAL
+  }
+  case SYS_SENSOR_ERR: { 
     bool recuperado = false; 
     for (int i = 0; i < 5; i++) {
 
@@ -1631,6 +1693,17 @@ void manejarErrores (SystemError Error){
       }
     }
     if (!recuperado) {
+          //CREAR MENSAJE A ENVIAR 
+    char bufferMensaje [200]; 
+    snprintf(bufferMensaje, sizeof(bufferMensaje),
+      "FALLO COMUNICACION CON SENSORES\n"
+      "INTENTA REINICIAR LA INCUBADORA \n"
+      "Temperatura Actual : %.1f C (Objetivo: %.1f C)\n"
+      "Humedad Actual     : %d %% (Objetivo: %d %%)\n",
+      currentTemp, tempGoal, currentHumid, humidGoal 
+    );
+    String mensajeFinalizacion = String(bufferMensaje); 
+    Callmebot.whatsappMessage(numeroTelefono, ApiKey, mensajeFinalizacion); 
       mensajeFalla = "SENSORES OFFLINE";
       Serial.print("NO se pudo recuperar comunicacion con los sensores"); 
       digitalWrite(rele, LOW);
@@ -1644,31 +1717,17 @@ void manejarErrores (SystemError Error){
     break;
   } 
 
-  case ERR_COMMUNICATION_BME:
+  case SYS_ERR_COMMUNICATION_BME:{
     reiniciarBME280(); 
     delay(100); 
     break;
-
-  case ERR_COMMUNICATION_ONEWIRE:
+  }
+  case SYS_ERR_COMMUNICATION_ONEWIRE:{
     reiniciarOneWire(); 
     delay(100); 
-    break;
+    break;}
   
   default:
     break;
   }
 }
-
-/*
-    if (millis()- ultimaAlarma >= 2000){
-      ultimaAlarma = millis(); 
-      alarmaOn= !alarmaOn; 
-    }
-    if (alarmaOn){
-      Serial.println("[ALARMA] Sonando...");
-        ledcWrite(2,250); 
-    } else {
-      ledcWrite(2,0); 
-      Serial.println("[ALARMA] Silenciada...");
-    }
-*/
