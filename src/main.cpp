@@ -42,6 +42,10 @@
 #define MAX7219_REG_DIG1   0x02
 #define MAX7219_REG_DIG2   0x03
 #define MAX7219_REG_DIG3   0x04
+#define MAX7219_REG_DIG4   0x05
+#define MAX7219_REG_DIG5   0x06
+#define MAX7219_REG_DIG6   0x07
+#define MAX7219_REG_DIG7   0x08
 #define MAX7219_REG_DECODE 0x09
 #define MAX7219_REG_INTENS 0x0A
 #define MAX7219_REG_SCAN   0x0B
@@ -61,17 +65,19 @@ enum SystemState {
   TEST_ACTUATORS,
   MODIFY_TIME,
   PROGRAM_DONE,
-  MODIFY_COLOR
+  MODIFY_COLOR,
+  PantallaFalla
 };
 //ESTADO DEL SYSTEMA 
 SystemState currentState = MENU_SELECT; 
 
 enum SystemError {
     ERR_OK,
-    ERR_TEMP,
+    SENSOR_ERR,
     ERR_HEAT,
     ERR_HUMEDAD,
-    ERR_COMMUNICATION
+    ERR_COMMUNICATION_BME,
+    ERR_COMMUNICATION_ONEWIRE
 };
 
 //PROTOTIPOS
@@ -94,6 +100,10 @@ void reiniciarBME280();
 void mostrarTemperatura(float temp); 
 void enviarMAX7219(uint8_t registro, uint8_t valor);
 void initMAX7219 ();  
+void enviarHumedad(int humedad); 
+void aplicarColorLEDs(); 
+void manejarErrores (SystemError Error); 
+SystemError verificarSistema (); 
 
 
 //DEFINIR COLORES PARA LEDS: 
@@ -196,6 +206,17 @@ float potenciaCalor = 0;
 unsigned long inicioVentana = 0;
 const unsigned long duracionMaxima = 3000; 
 bool motorON = false; 
+bool cambiarColorLED = false; 
+const unsigned long coolDownRefresco = 50; 
+unsigned long ultimoRefresco = 0; 
+int temperaturaIgual = 0; 
+int falloSensores = 0; 
+int vecesRevisada = 0; 
+int vecesEncendidasResistencia = 0; 
+const char* mensajeFalla = "ERROR DESCONOCIDO";
+bool movimientoEncoder = false; 
+unsigned long ultimoEncendidoLed = 0; 
+
 
 //VARIABLES PARA SONAR ALARMA 
 bool alarmaOn = false; //FLAG PARA HACER QUE SEA INTERNMITENTE LA ALARMA 
@@ -235,7 +256,7 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18b20(&oneWire);
 
 //CONSTRUCTOR LEDS
-Adafruit_NeoPixel tiraLed (32, dataLED , NEO_GRB + NEO_KHZ800); //CUANTOS LED, QUE PIN, PROTOCOOLO, FRCUENCIA
+Adafruit_NeoPixel tiraLed (64, dataLED , NEO_GRB + NEO_KHZ800); //CUANTOS LED, QUE PIN, PROTOCOOLO, FRCUENCIA
 
 
 //CONSTRUCTOR PANTALLA
@@ -571,6 +592,36 @@ void actualizarMenu (){
         pantalla.print(">> GUARDAR Y VOLVER <<");
       }
     }
+  } else if (currentState == PantallaFalla){
+    // 1. Fondo de alerta rojo
+    pantalla.fillScreen(ST7735_RED);
+
+    // 2. Encabezado de Error Crítico
+    pantalla.fillRect(0, 0, 160, 24, ST7735_BLACK);
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_RED, ST7735_BLACK);
+    pantalla.setCursor(12, 8);
+    pantalla.print("!! FALLA CRITICA !!");
+
+    // 3. Icono / Texto de Advertencia
+    pantalla.setTextSize(2);
+    pantalla.setTextColor(ST7735_WHITE, ST7735_RED);
+    pantalla.setCursor(20, 36);
+    pantalla.print("SISTEMA STOP");
+
+    // 4. Detalle de la Falla
+    pantalla.setTextSize(1);
+    pantalla.setCursor(8, 62);
+    pantalla.print("CAUSA:");
+    pantalla.setCursor(8, 74);
+    pantalla.setTextColor(ST7735_YELLOW, ST7735_RED);
+    pantalla.print(mensajeFalla);
+
+    // 5. Botón interactivo para reiniciar
+    pantalla.fillRect(10, 100, 140, 20, ST7735_BLACK);
+    pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
+    pantalla.setCursor(22, 106);
+    pantalla.print("> REINICIAR <");
   }
 }
 
@@ -581,6 +632,8 @@ void setup() {
   pinMode(rele, OUTPUT);
   pinMode(humid, OUTPUT); 
   pinMode(buzzer, OUTPUT);
+  pinMode(TFT_CS, OUTPUT); 
+  digitalWrite(TFT_CS, HIGH); // Mantiene aislada la TFT de inmediato
   digitalWrite(rele,LOW); 
 
   // Leemos el estado inicial de reposo de CLK (casi siempre HIGH)
@@ -608,8 +661,8 @@ void setup() {
 
   //EMPEZAR PROTOCOLO TIRA LED
   tiraLed.begin();
-  tiraLed.setBrightness(60); 
-  tiraLed.show(); //APAGA TODO LOS LEDS AL ARRANCAR 
+  tiraLed.setBrightness(100); 
+  aplicarColorLEDs();  
 
 
   pantalla.initR(INITR_BLACKTAB); 
@@ -654,12 +707,17 @@ void setup() {
 unsigned long lastSensorTime = 0;
 
 void loop() {
-  
+
+
   if (currentTemp != lastTemp){
     lastTemp = currentTemp; 
+    temperaturaIgual = 0 ; //REINICIAR SI LA TEMPERATURA ESTA CAMBIANDO 
   }
+    else { temperaturaIgual++; } //SI LA TEMPERATURA ES IGUAL SE SUMA PARA VERIFICAR UQE SIRVA EL CALEFACTO
+
   if (currentHumid != lastHumid){
     lastHumid = currentHumid; 
+    
   }
 
 
@@ -676,10 +734,7 @@ void loop() {
 
     if (alarmaOn){
       Serial.println("[ALARMA] Sonando...");
-      for (int i = 50; i <255 ; i++){
-        ledcWrite(2,i); 
-      }
-      
+        ledcWrite(2,250); 
     } else {
       ledcWrite(2,0); 
       Serial.println("[ALARMA] Silenciada...");
@@ -725,6 +780,23 @@ void loop() {
       calcularPWMTemp(tempGoal);
       calcularPWMHumedad(humidGoal);
     } 
+    if (millis() - ultimoEncendidoLed >= 60000 && movimientoEncoder == false){
+      tiraLed.setBrightness(40);
+      aplicarColorLEDs(); 
+      ultimoEncendidoLed = millis(); 
+    } else if (movimientoEncoder){
+      tiraLed.setBrightness (100);  // AJUSTAR BRILLO EN MENU Y PODER PONER LA VARIABLE AQUI  
+      aplicarColorLEDs(); 
+    }
+  }
+
+  if (currentState == PantallaFalla){
+    // Alarma sonora intermitente
+    if (millis() - ultimaAlarma >= 1000) {
+      ultimaAlarma = millis();
+      alarmaOn = !alarmaOn;
+      ledcWrite(2, alarmaOn ? 220 : 0);
+    }
   }
 
   //LECTURA DE SENSORES
@@ -776,26 +848,33 @@ void loop() {
     if (oneWireValido && coherenciaBME){
       sensores = 0; // CASO 0 = TODO FUNCIONA  esta variable se va a usar cuando se vea la temp
       currentTemp = ((tempOneWire + tempBME280)/2);
+      falloSensores = 0; 
     }
     //CASO 2 SENSOR HUMEDAD Y TEMP FUNCIONA
     else if (!oneWireValido && coherenciaBME){
       sensores = 1; // CASO 1 = FUNCIONA SOLO HUMEDAD Y TEMPERATURA
       currentTemp = tempBME280; 
+      falloSensores = 0; 
     }
     //CASO 3 SENSOR ONEWIRE FUNCIONA SOLO
     else if (oneWireValido && !coherenciaBME){
       sensores = 2; //CASO 2 = FUNCIONA SOLO ONEWIRE
       currentTemp = tempOneWire;
+      falloSensores = 0; 
     }
     //CASO 4 NINGUNO FUNCIONA 
     else {
       sensores = 3; // NADA FUNCIONA PARAR EL CALENTAMIENTO Y SACAR AIRE 
       currentTemp = lastTemp; 
+      falloSensores++; 
     }
 
     mostrarTemperatura(currentTemp); 
+    enviarHumedad(currentHumid); 
+    SystemError error = verificarSistema();
+    manejarErrores(error);  
   }
-  
+  movimientoEncoder = false; 
 }
 
 void leerEncoder() {
@@ -907,7 +986,7 @@ void leerEncoder() {
           }
         }
       }
-      else if (currentState == MODIFY_COLOR){
+        else if (currentState == MODIFY_COLOR){
         if (!editMode) {
           // Cambiar entre "Editar Color" (0) y "Guardar y Volver" (1)
           if (giroHorario && selectedItem < 1) selectedItem++;
@@ -921,7 +1000,7 @@ void leerEncoder() {
           }
 
           // Reflejo en tiempo real en la tira de LEDs
-          for (int p = 0; p < 32; p++) {
+          for (int p = 0; p < 64; p++) {
             tiraLed.setPixelColor(p, tablaColoresNeo[colorLedsIndex]);
           }
           tiraLed.show();
@@ -952,6 +1031,8 @@ void botonPresionado (){
 
     if (reading != confirmedBtnState) {
       confirmedBtnState = reading;
+      movimientoEncoder = true; 
+      ultimoEncendidoLed = millis(); 
 
       // El botón se presiona cuando cae a LOW
       if (confirmedBtnState == LOW) {
@@ -1062,6 +1143,19 @@ void botonPresionado (){
         }
         actualizarMenu();
       }
+      else if (currentState == PantallaFalla) {
+        // Al presionar el botón, apagar alarma y volver al menú principal
+        ledcWrite(2, 0); // Apagar buzzer
+        alarmaOn = false;
+        vecesRevisada = 0;
+        vecesEncendidasResistencia = 0;
+        falloSensores = 0;
+        
+        currentState = MENU_SELECT;
+        selectedItem = 0;
+        pantalla.fillScreen(ST7735_BLACK);
+        actualizarMenu();
+      }
     }
     }
   }
@@ -1076,6 +1170,7 @@ void programaMamiferos (){
   selectedItem = 0;
   editMode = false;
   currentState = MODIFY_PROGRAM;
+  aplicarColorLEDs(); 
 
   pantalla.fillScreen(ST7735_BLACK);
   actualizarMenu();
@@ -1089,6 +1184,8 @@ void programaGallina (){
   editMode  = false;
   currentState = MODIFY_PROGRAM;
   selectedItem = 0;
+    aplicarColorLEDs(); 
+
   pantalla.fillScreen(ST7735_BLACK);
   actualizarMenu();
 
@@ -1102,6 +1199,7 @@ void programaReptiles (){
   editMode  = false;
   currentState = MODIFY_PROGRAM;
   selectedItem = 0;
+    aplicarColorLEDs();
   pantalla.fillScreen(ST7735_BLACK);
   actualizarMenu();
 }
@@ -1114,6 +1212,7 @@ void programaFermentacion (){
   editMode  = false;
   currentState = MODIFY_PROGRAM;
   selectedItem = 0;
+    aplicarColorLEDs();
   pantalla.fillScreen(ST7735_BLACK);
   actualizarMenu();
 }
@@ -1127,9 +1226,11 @@ void programaManual (){
   selectedItem = 0;
   editMode = false;
   currentState = MODIFY_PROGRAM;
-
+  
+  aplicarColorLEDs(); 
   pantalla.fillScreen(ST7735_BLACK);
   actualizarMenu();
+
 }
 
 void IRAM_ATTR isrEncoder() {
@@ -1161,6 +1262,8 @@ void IRAM_ATTR isrEncoder() {
       pasosEncoder--; // Registra un paso a la izquierda pendiente de procesar
       pasosAcumulados = 0;
     }
+    movimientoEncoder = true; 
+    ultimoEncendidoLed = millis(); 
   }
 }
 
@@ -1224,6 +1327,7 @@ void manejarCalor (float PWMgenerado){
 
   if ( PWMgenerado >0 && (tiempoActual - inicioVentana) < tiempoEncendido){
     digitalWrite(rele, HIGH); 
+    vecesEncendidasResistencia++; 
   } else {
     digitalWrite(rele, LOW);
   }
@@ -1309,6 +1413,17 @@ void reiniciarBME280(){
 
 }
 
+void reiniciarOneWire(){
+Serial.println("[RECUPERACIÓN] Reinicializando bus OneWire (DS18B20)...");
+  
+  // Re-inicializar la librería sobre el pin definido
+  ds18b20.begin();
+  ds18b20.setResolution(12);
+  ds18b20.setWaitForConversion(false);
+  ds18b20.requestTemperatures();
+  
+  delay(20);
+}
 // ==========================================
 // BIT-BANGING ROBUSTO CON REACTIVACIÓN DE HARDWARE SPI
 // ==========================================
@@ -1353,8 +1468,8 @@ void initMAX7219() {
 
   delay(50);
   enviarMAX7219(MAX7219_REG_TEST, 0x00);    // Modo prueba apagado
-  enviarMAX7219(MAX7219_REG_SCAN, 0x03);    // 4 dígitos habilitados (0 a 3)
-  enviarMAX7219(MAX7219_REG_DECODE, 0x0F);  // Code B en los 4 dígitos
+  enviarMAX7219(MAX7219_REG_SCAN, 0x07);    // 8 dígitos habilitados (0 a 3)
+  enviarMAX7219(MAX7219_REG_DECODE, 0xFF);  // Code B en los 4 dígitos
   enviarMAX7219(MAX7219_REG_INTENS, 0x07);  // Brillo medio
   enviarMAX7219(MAX7219_REG_SHUTDN, 0x01);  // Encender
 }
@@ -1362,11 +1477,6 @@ void initMAX7219() {
 void mostrarTemperatura(float temp) {
   // Asegurar que la pantalla TFT no escuche
   digitalWrite(TFT_CS, HIGH);
-
-  // Enviar configuración segura de recuperación
-  enviarMAX7219(MAX7219_REG_TEST, 0x00);   
-  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01); 
-  enviarMAX7219(MAX7219_REG_DECODE, 0x0F); 
 
   if (temp < -9.9 || temp > 99.9) {
     enviarMAX7219(MAX7219_REG_DIG0, 0x0A); // '-'
@@ -1387,72 +1497,148 @@ void mostrarTemperatura(float temp) {
   enviarMAX7219(MAX7219_REG_DIG3, 0x0F);
 }
 
-/*
-void enviarMAX7219(uint8_t registro, uint8_t valor){
-  // apagar la transmision de la pantalla 
+void enviarHumedad(int humedad){
+  // Asegurar que la pantalla TFT no escuche
   digitalWrite(TFT_CS, HIGH);
-  digitalWrite(TFT_CS, HIGH); 
 
-  digitalWrite( SPI_CS, HIGH); 
-  delayMicroseconds(2); 
-
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-
-  digitalWrite(SPI_CS, LOW); 
-  delayMicroseconds(2); 
-
-  SPI.transfer(registro); 
-  SPI.transfer(valor); 
-
-  delayMicroseconds(2); 
-  digitalWrite(SPI_CS, HIGH); 
-  delayMicroseconds(2); 
-
-  SPI.endTransaction(); 
-
-  digitalWrite(TFT_CS, HIGH);
-  delayMicroseconds(1);
-
-}
-
-void initMAX7219 (){
-  pinMode(SPI_CS, OUTPUT); 
-  digitalWrite(SPI_CS, HIGH);
-  pinMode(TFT_CS, OUTPUT);
-  digitalWrite(TFT_CS, HIGH); 
-
-  delay (100); 
-  enviarMAX7219(MAX7219_REG_TEST, 0x00); //APAGADO EN MODO PRUEBA
-  enviarMAX7219(MAX7219_REG_SHUTDN, 0x00);
-  delay (10); 
-  enviarMAX7219(MAX7219_REG_SCAN, 0x03);    // Habilitar 4 dígitos (DIG_0 a DIG_3)
-  enviarMAX7219(MAX7219_REG_DECODE, 0x07);  // Activar Code B en los 4 dígitos (0 a 3)
-  enviarMAX7219(MAX7219_REG_INTENS, 0x08);  // Brillo medio (0x00 a 0x0F)
-  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01);  // Salir de standby / Encender
-}
-
-void mostrarTemperatura(float temp){
-
-  enviarMAX7219(MAX7219_REG_TEST, 0x00); 
-  enviarMAX7219(MAX7219_REG_SHUTDN, 0x01); 
-  enviarMAX7219(MAX7219_REG_DECODE, 0x07); // Asegura decodificación Code B
-
-  if (temp < -9.9 || temp > 99.9){
+    if (humedad < 0 || humedad > 99) {
     enviarMAX7219(MAX7219_REG_DIG0, 0x0A); // '-'
     enviarMAX7219(MAX7219_REG_DIG1, 0x0A); // '-'
     enviarMAX7219(MAX7219_REG_DIG2, 0x0A); // '-'
     enviarMAX7219(MAX7219_REG_DIG3, 0x0F); // Blanco
     return;
   }
-  int valorEntero = (int)((temp * 10) + 0.5); 
-  int decena = (valorEntero/100) % 10;
-  int unidad = (valorEntero/10) % 10; 
-  int decima = (valorEntero) % 10; 
+  
+  //conversiona digitos a digito
+  int decena = ((humedad / 10) % 10);
+  int unidad = (humedad % 10); 
 
-  // ENVIAR DIGITOS
-  enviarMAX7219(MAX7219_REG_DIG0, (decena > 0) ? decena : 0x0F); //0x0F es NADA EN EL DISPLAY
-  enviarMAX7219(MAX7219_REG_DIG1, unidad | 0x80 ); //AGREGAR AL BINARIO EL PUNTO DECIMAL EN MSB
-  enviarMAX7219(MAX7219_REG_DIG2, decima); 
-  enviarMAX7219(MAX7219_REG_DIG3, 0x4E); // UNA C de CELCIUS  
+  enviarMAX7219(MAX7219_REG_DIG4, (decena > 0) ? decena : 0x0F);
+  enviarMAX7219(MAX7219_REG_DIG5, unidad ); 
+  enviarMAX7219(MAX7219_REG_DIG6, 0x0F); 
+  enviarMAX7219(MAX7219_REG_DIG7, 0x0F);
 }
-  */
+
+// ==========================================
+// FUNCIÓN PARA APLICAR COLOR A LOS 32 LEDS
+// ==========================================
+void aplicarColorLEDs() {
+  for (int p = 0; p < 64; p++) {
+    tiraLed.setPixelColor(p, tablaColoresNeo[colorLedsIndex]);
+  }
+  tiraLed.show(); 
+}
+
+
+SystemError verificarSistema (){
+
+if (currentState ==RUNNING_AUTO && potenciaCalor >0 ){
+  if (vecesEncendidasResistencia <= 10){
+    if ((currentTemp - lastTemp) <= 0){ //temperatura NO SUBE CORRECTAMENTE
+      vecesRevisada++; 
+      if (vecesRevisada >= 5){
+        return ERR_HEAT; 
+      }
+    } 
+  }
+  }
+
+  if (falloSensores >= 5){
+    return SENSOR_ERR; 
+  }
+
+  Wire.beginTransmission(0x76);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("[ERROR SISTEMA] Fallo de comunicación I2C con BME280");
+    return ERR_COMMUNICATION_BME;
+  }
+
+  if (ds18b20.getTempCByIndex(0) == DEVICE_DISCONNECTED_C){
+    Serial.println("[ERROR SISTEMA] Fallo de comunicación I2C con ONEWIRE");
+    return ERR_COMMUNICATION_ONEWIRE; 
+  }
+
+  return ERR_OK; 
+}
+
+void manejarErrores (SystemError Error){
+
+  switch (Error)
+  {
+  case ERR_HEAT:
+    mensajeFalla = "FALLO RESISTENCIA";
+    Serial.print("FALLO EN LA RESITENCIA. VERIFICA QUE LA PUERTA ESTE CERRADA");
+    // Apagar actuadores por seguridad
+    digitalWrite(rele, LOW);
+    digitalWrite(humid, LOW);
+    ledcWrite(0, 0);
+    ledcWrite(1, 0);
+    currentState = PantallaFalla; //HACER PANTALLA PARA FALLO TOTAL APAGAR TODO Y MOSTRAR FALLO
+    pantalla.fillScreen(ST7735_BLACK);
+    actualizarMenu();
+    break;
+
+  case SENSOR_ERR: { // <-- LLAVE DE APERTURA PARA CREAR SCOPE LOCAL
+    bool recuperado = false; 
+    for (int i = 0; i < 5; i++) {
+
+      reiniciarBME280();
+      reiniciarOneWire();
+      delay(100); 
+
+      //PROBAR SI FUNCIONA EL BME
+      Wire.beginTransmission(0x76); 
+      bool BMEOK = (Wire.endTransmission() == 0); 
+
+      //PROBAR SI FUNCIONA ONEWIRE 
+      float tempDS = ds18b20.getTempCByIndex(0);
+      bool oneWireOK = (tempDS != DEVICE_DISCONNECTED_C && tempDS > -50.0);
+
+      if (BMEOK || oneWireOK) {
+        Serial.print("SE RECUPERO LOS SENSORES"); 
+        recuperado = true; 
+        break;
+      }
+    }
+    if (!recuperado) {
+      mensajeFalla = "SENSORES OFFLINE";
+      Serial.print("NO se pudo recuperar comunicacion con los sensores"); 
+      digitalWrite(rele, LOW);
+      digitalWrite(humid, LOW);
+      ledcWrite(0, 0);
+      ledcWrite(1, 0);
+      currentState = PantallaFalla; 
+      pantalla.fillScreen(ST7735_BLACK);
+      actualizarMenu();
+    }
+    break;
+  } 
+
+  case ERR_COMMUNICATION_BME:
+    reiniciarBME280(); 
+    delay(100); 
+    break;
+
+  case ERR_COMMUNICATION_ONEWIRE:
+    reiniciarOneWire(); 
+    delay(100); 
+    break;
+  
+  default:
+    break;
+  }
+}
+
+/*
+    if (millis()- ultimaAlarma >= 2000){
+      ultimaAlarma = millis(); 
+      alarmaOn= !alarmaOn; 
+    }
+    if (alarmaOn){
+      Serial.println("[ALARMA] Sonando...");
+        ledcWrite(2,250); 
+    } else {
+      ledcWrite(2,0); 
+      Serial.println("[ALARMA] Silenciada...");
+    }
+*/
