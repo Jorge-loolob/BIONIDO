@@ -9,6 +9,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <WiFi.h>
 #include <Callmebot_ESP32.h>
+#include <ESP32Servo.h> 
 
 
 #define ST77XX_DARKGREY 0x7BEF
@@ -69,7 +70,8 @@ enum SystemState {
   MODIFY_TIME,
   PROGRAM_DONE,
   MODIFY_COLOR,
-  PantallaFalla
+  PantallaFalla,
+  configMotor
 };
 //ESTADO DEL SYSTEMA 
 SystemState currentState = MENU_SELECT; 
@@ -106,6 +108,7 @@ void enviarHumedad(int humedad);
 void aplicarColorLEDs(); 
 void manejarErrores (SystemError Error); 
 SystemError verificarSistema (); 
+void motorVolteo (bool SeUsaMotor); 
 
 
 //DEFINIR COLORES PARA LEDS: 
@@ -147,7 +150,7 @@ const char* opcionesProgramas [OPCIONES_PROGRAMA] = {
   "Temperatura: ",
   "Humedad: ",
   "Tiempo: ",
-  "Motor: ",
+  "Volteo Huevos ",
   "Iluminacion",
   ">> CONFIRMAR <<"
 };
@@ -165,6 +168,17 @@ const char* opciones_Tiempo [OPCIONES_TIEMPO] = {
   "MINUTOS: ",
   ">> VOLVER <<"
 };
+
+//MENU PARA CONFIGURAR INTERVALO DE ACTIVACION DE MOTOR 
+const int OPCIONES_MOTOR = 4; 
+const char* opciones_motor [OPCIONES_MOTOR] = {
+  "MOTOR: ",
+  "HORAS: ",
+  "MINUTOS: ",
+  ">>VOLVER<<"
+}; 
+int intervaloMotorHoras = 1; 
+int intervaloMotorMinutos = 0; 
 
 // Tabla de conversión a formato de color para pantalla ST7735 (RGB565 de 16 bits)
 const uint16_t coloresTFT[TOTAL_COLORES] = {
@@ -269,6 +283,9 @@ Adafruit_BME280 bme;
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18b20(&oneWire);
 
+//CONSTRUCTOR MOTOR VOLTEO
+Servo motorVolteador; 
+
 //CONSTRUCTOR LEDS
 Adafruit_NeoPixel tiraLed (64, dataLED , NEO_GRB + NEO_KHZ800); //CUANTOS LED, QUE PIN, PROTOCOOLO, FRCUENCIA
 
@@ -334,8 +351,6 @@ void actualizarMenu (){
         pantalla.print(" %");
       } else if (i == 2) {
         pantalla.printf("%dd %02dh %02dm", diasGoal, horasGoal, minutosGoal);
-      } else if (i == 3) {
-        pantalla.print(motorON ? "ON " : "OFF");
       }
     }
   } else if (currentState == RUNNING_AUTO){
@@ -609,7 +624,8 @@ void actualizarMenu (){
         pantalla.print(">> GUARDAR Y VOLVER <<"); 
       }
     }
-  } else if (currentState == PantallaFalla){
+  } 
+  else if (currentState == PantallaFalla){
     // 1. Fondo de alerta rojo
     pantalla.fillScreen(ST7735_RED);
 
@@ -639,6 +655,59 @@ void actualizarMenu (){
     pantalla.setTextColor(ST7735_WHITE, ST7735_BLACK);
     pantalla.setCursor(22, 106);
     pantalla.print("> REINICIAR <");
+  }
+  else if (currentState == configMotor){
+    // 1. Cabecera Fija
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+    pantalla.setCursor(12, 6);
+    pantalla.print("CONFIG. VOLTEO MOTOR");
+    pantalla.drawFastHLine(0, 16, 160, ST77XX_DARKGREY);
+
+    // 2. Recuadro gráfico de énfasis para el Intervalo
+    pantalla.drawRect(6, 34, 148, 54, ST7735_CYAN);
+    
+    // Texto fijo informativo (NUNCA se selecciona ni cambia de color)
+    pantalla.setTextColor(ST7735_YELLOW, ST7735_BLACK);
+    pantalla.setCursor(12, 38);
+    pantalla.print("INTERVALO:");
+
+    // 3. Renderizado de las 4 Opciones Seleccionables
+    for (int i = 0; i < OPCIONES_MOTOR; i++) {
+      int posY;
+      
+      // Mapear posiciones Y para dejar espacio al título fijo
+      if (i == 0)      posY = 20; // MOTOR (Arriba del recuadro)
+      else if (i == 1) posY = 52; // HORAS (Dentro del recuadro)
+      else if (i == 2) posY = 68; // MINUTOS (Dentro del recuadro)
+      else             posY = 94; // VOLVER (Debajo del recuadro)
+
+      if (i == selectedItem) {
+        uint16_t colorFondo = editMode ? ST7735_ORANGE : ST7735_BLUE;
+        pantalla.fillRect(8, posY - 1, 144, 14, colorFondo);
+        pantalla.setTextColor(ST7735_WHITE);
+        pantalla.setCursor(12, posY + 2);
+        pantalla.print(editMode ? "* " : "> ");
+      } else {
+        pantalla.fillRect(8, posY - 1, 144, 14, ST7735_BLACK);
+        pantalla.setTextColor(ST77XX_DARKGREY);
+        pantalla.setCursor(12, posY + 2);
+        pantalla.print("  ");
+      }
+
+      pantalla.print(opciones_motor[i]);
+
+      // Valores dinámicos
+      if (i == 0) {
+        pantalla.print(motorON ? "HABILITADO" : "DESACTIVADO");
+      } 
+      else if (i == 1) { // HORAS
+        pantalla.printf("%d hrs", intervaloMotorHoras);
+      } 
+      else if (i == 2) { // MINUTOS
+        pantalla.printf("%02d min", intervaloMotorMinutos);
+      }
+    }
   }
 }
 
@@ -701,6 +770,12 @@ void setup() {
   ledcSetup(2,2700,8); //PWM para el sonido del buzzer 
   ledcAttachPin(buzzer, 2);
   ledcWrite(2,0); 
+
+  ESP32PWM::allocateTimer (3); 
+  //configurar PWM del servo
+  motorVolteador.setPeriodHertz(50); 
+  motorVolteador.attach(servo,500,2400);
+  motorVolteador.write(90);  
 
   
   initMAX7219(); 
@@ -937,6 +1012,7 @@ void loop() {
     } else { conexionWifi = false; }
   }
 
+  motorVolteo(motorON);
   movimientoEncoder = false; 
 }
 
@@ -992,10 +1068,6 @@ void leerEncoder() {
               } else {
                 if (diasGoal > 1) diasGoal -= 1;
               }
-              break;
-
-            case 3: // Motor volteador
-              motorON = giroHorario;
               break;
 
             default:
@@ -1081,6 +1153,39 @@ void leerEncoder() {
           aplicarColorLEDs();
         }
       }
+      else if (currentState == configMotor){
+        if (!editMode){ //SE VA A DESPLAZAR EL USUARIo
+          if (giroHorario){
+            if (selectedItem < OPCIONES_MOTOR - 1) selectedItem++;
+          } else 
+            if (selectedItem > 0) selectedItem--; 
+        }
+        else {
+          switch (selectedItem)
+          {
+          case 0: 
+           motorON = giroHorario;
+            break;
+
+          case 1: 
+           if (giroHorario && intervaloMotorHoras < 24) intervaloMotorHoras++; 
+            else {
+              if (!giroHorario && intervaloMotorHoras > 0) intervaloMotorHoras --; 
+            }
+            break;
+
+          case 2: 
+           if (giroHorario && intervaloMotorMinutos < 60) intervaloMotorMinutos++; 
+            else {
+              if (!giroHorario && intervaloMotorMinutos > 0) intervaloMotorMinutos--; 
+            }
+            break;
+          
+          default:
+            break;
+          }
+        }
+      }
       actualizarMenu();
   }
 }
@@ -1146,7 +1251,17 @@ void botonPresionado (){
             pantalla.fillScreen(ST7735_BLACK);
             actualizarMenu();
         
-        } else if(selectedItem == 4){
+        }
+        else if (selectedItem == 3){
+
+          currentState = configMotor; 
+          selectedItem = 0; 
+          editMode = false; 
+          pantalla.fillScreen(ST7735_BLACK); 
+          actualizarMenu(); 
+
+        }
+        else if(selectedItem == 4){
             currentState = MODIFY_COLOR; 
             editMode = false; 
             pantalla.fillScreen(ST7735_BLACK);
@@ -1224,6 +1339,18 @@ void botonPresionado (){
         selectedItem = 0;
         pantalla.fillScreen(ST7735_BLACK);
         actualizarMenu();
+      }
+      else if (currentState == configMotor){
+        if (selectedItem == 0 || selectedItem == 1 || selectedItem == 2){
+          editMode = !editMode; 
+        }
+        if (selectedItem == 3 ){
+          editMode = false;
+          selectedItem =3;        //RECUERDA HACER LA FUNCION PARA CONVERTIR LOS VALORES A TIEMPO DEL PROCESADOR 
+          currentState = MODIFY_PROGRAM;   //LA FUNCION DEL MOTOR CON LOS VALORES DE ENTRADA DE LA CONFIGURACION INTERVALOMOTORHORAS
+          pantalla.fillScreen(ST7735_BLACK);
+        }
+        actualizarMenu(); 
       }
     }
     }
@@ -1730,4 +1857,36 @@ void manejarErrores (SystemError Error){
   default:
     break;
   }
+}
+
+unsigned long ultimaRevisionMotor = 0; 
+
+
+void motorVolteo (bool SeUsaMotor){
+  if (currentState == RUNNING_AUTO){
+    if (SeUsaMotor){
+      if (segRestantes > 0 ){
+
+        unsigned long tiempoActivarMotor = ((uint32_t)intervaloMotorHoras * 3600UL + (uint32_t)intervaloMotorMinutos * 60UL)* 1000UL; 
+        
+        if (tiempoActivarMotor <= 0) return; 
+
+        if (millis()- ultimaRevisionMotor >= tiempoActivarMotor){
+          ultimaRevisionMotor = millis(); 
+          static bool posicionInclinada = false; 
+          posicionInclinada = !posicionInclinada; 
+
+          if (posicionInclinada){
+            motorVolteador.write(135);
+            Serial.print("voltear 135");
+          } else {
+            motorVolteador.write(45);
+            Serial.print("voltear a 45");
+          }
+        }
+      }
+    }
+  } 
+  else {
+      return; }
 }
