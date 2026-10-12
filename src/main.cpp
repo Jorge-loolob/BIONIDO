@@ -71,7 +71,8 @@ enum SystemState {
   PROGRAM_DONE,
   MODIFY_COLOR,
   PantallaFalla,
-  configMotor
+  configMotor,
+  configWA
 };
 //ESTADO DEL SYSTEMA 
 SystemState currentState = MENU_SELECT; 
@@ -125,14 +126,23 @@ int colorLedsIndex = 0; // Índice de nombresColores[] (0 a 5)
 
 
 //CONFIGURACIONES MENU
-const int TOTAL_MENU_ITEMS = 5; 
+const int TOTAL_MENU_ITEMS = 6; 
 const char* menuItems [TOTAL_MENU_ITEMS] = {
   "1. Huevos (Gallina)",
   "2. Reptiles",
   "3. Mamiferos",
   "4. Fermentacion",
-  "5. Modo Manual"
+  "5. Modo Manual",
+  "6. Reportes WhatsApp"
 }; 
+
+// CONFIGURACION PANTALLA WPP
+const int TOTAL_MENU_WA = 3;
+const char* menuItemsWA [TOTAL_MENU_WA] = {
+  "REPORTE POR MSJ: ",
+  "FRECUENCIA: ",
+  ">>GUARDAR Y VOLVER<<"
+};
 
 //menu PARA CAMBIAR DE COLOR LED
 const int TOTAL_COLORES = 6; 
@@ -271,6 +281,10 @@ int diasTranscurridos = 0;
 unsigned long ultimaLectura = 0;
 const unsigned long intervaloLectura = 3000; //3 segundos 
 
+//variables para configurar chequeos en wpp;
+int intervaloWAHoras = 1;
+bool reporteActivo = false; 
+unsigned long ultimoEnvioWA = 0; 
 
 
 // Control de rebote (debounce) para el botón del switch
@@ -295,8 +309,17 @@ Adafruit_ST7735 pantalla = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 void actualizarMenu (){
   if (currentState == MENU_SELECT){
+    //  ENCABEZADO  DE LA PANTALLA PRINCIPAL
+    pantalla.fillRect(0, 0, 160, 22, ST7735_BLUE);
+    pantalla.setTextColor(ST7735_WHITE, ST7735_BLUE);
+    pantalla.setTextSize(1);
+    pantalla.setCursor(14, 7);
+    pantalla.print("SISTEMA INCUBADORA");
+    pantalla.drawFastHLine(0, 22, 160, ST7735_CYAN);
+
+
     for (int i=0; i< TOTAL_MENU_ITEMS ; i++){
-      int posY= 28 + (i * 18); //CALCULAR POSICION DONDE SE VE BIEN EL RENGLON
+      int posY= 26 + (i * 16); //CALCULAR POSICION DONDE SE VE BIEN EL RENGLON
 
     //si recorre el arreglo y cae en la variable que esta apuntando el ususario
       if (i == selectedItem){
@@ -708,6 +731,45 @@ void actualizarMenu (){
         pantalla.printf("%02d min", intervaloMotorMinutos);
       }
     }
+  } 
+  else if (currentState == configWA){
+    // 1. Cabecera
+    pantalla.setTextSize(1);
+    pantalla.setTextColor(ST7735_CYAN, ST7735_BLACK);
+    pantalla.setCursor(14, 6);
+    pantalla.print("NOTIFICACIONES WPP");
+    pantalla.drawFastHLine(0, 16, 160, ST77XX_DARKGREY);
+
+    // 2. Recuadro decorativo de configuración
+    pantalla.drawRect(6, 24, 148, 64, ST7735_GREEN);
+
+    // 3. Dibujar opciones del submenú
+    for (int i = 0; i < TOTAL_MENU_WA; i++) {
+      int posY = 32 + (i * 22);
+
+      if (i == selectedItem) {
+        uint16_t colorFondo = editMode ? ST7735_ORANGE : ST7735_BLUE;
+        pantalla.fillRect(8, posY - 1, 144, 17, colorFondo);
+        pantalla.setTextColor(ST7735_WHITE);
+        pantalla.setCursor(12, posY + 3);
+        pantalla.print(editMode ? "* " : "> ");
+      } else {
+        pantalla.fillRect(8, posY - 1, 144, 17, ST7735_BLACK);
+        pantalla.setTextColor(ST77XX_DARKGREY);
+        pantalla.setCursor(12, posY + 3);
+        pantalla.print("  ");
+      }
+
+      pantalla.print(menuItemsWA[i]);
+
+      // Impresión de valores
+      if (i == 0) {
+        pantalla.print(reporteActivo ? "ON" : "OFF");
+      } 
+      else if (i == 1) {
+        pantalla.printf("Cada %dh", intervaloWAHoras);
+      }
+    }
   }
 }
 
@@ -881,7 +943,7 @@ void loop() {
     //CREAR MENSAJE A ENVIAR 
     char bufferMensaje [200]; 
     snprintf(bufferMensaje, sizeof(bufferMensaje),
-      "Programa Finalizado Exitosamente\n"
+      "*Programa Finalizado Exitosamente*\n"
       "Temperatura Final : %.1f C (Objetivo: %.1f C)\n"
       "Humedad Final     : %d %% (Objetivo: %d %%)\n"
       "Duracion          : %dd %02dh %02dm\n",
@@ -914,8 +976,31 @@ void loop() {
       aplicarColorLEDs(); 
       ultimoEncendidoLed = millis(); 
     } else if (movimientoEncoder){
-      tiraLed.setBrightness (map(brilloLedActual,0,100,0,255));  // AJUSTAR BRILLO EN MENU Y PODER PONER LA VARIABLE AQUI  
+      tiraLed.setBrightness (map(brilloLedActual,0,100,0,255));  
       aplicarColorLEDs(); 
+    }
+    //TIMER PARA ENVIAR ACTUALIZACIONES POR WA
+    if (reporteActivo && conexionWifi){
+      //CONVERITR HORAS A MILISEGUNDOS
+      unsigned long intervaloMS = (uint32_t)intervaloWAHoras * 3600000UL; 
+      if (millis() - ultimoEnvioWA >= intervaloMS){
+        ultimoEnvioWA = millis(); 
+
+        char bufferWA[220];
+        snprintf(bufferWA, sizeof(bufferWA),
+          "📊 *REPORTE INCUBADORA*\n"
+          "Temp: %.1f C (Meta: %.1f C)\n"
+          "Humedad: %d %% (Meta: %d %%)\n"
+          "Tiempo restante: %dd %02dh %02dm\n"
+          "Estado Volteo: %s",
+          currentTemp, tempGoal,
+          currentHumid, humidGoal,
+          (segRestantes / 86400UL), ((segRestantes % 86400UL) / 3600UL), ((segRestantes % 3600UL) / 60UL),
+          motorON ? "ON" : "OFF"
+        );
+
+        Callmebot.whatsappMessage(numeroTelefono,ApiKey, String(bufferWA)); 
+      }
     }
   }
 
@@ -1186,6 +1271,27 @@ void leerEncoder() {
           }
         }
       }
+      else if (currentState == configWA){
+        if (!editMode){
+          if (giroHorario && selectedItem < TOTAL_MENU_WA-1) selectedItem++; 
+            else if (!giroHorario && selectedItem > 0 ) selectedItem--; 
+        } else {
+          switch (selectedItem)
+          {
+          case 0:
+            reporteActivo = giroHorario; 
+            break;
+
+          case 1:
+            if (giroHorario && intervaloWAHoras < 24) intervaloWAHoras++; 
+              else if (!giroHorario && intervaloWAHoras > 0) intervaloWAHoras--; 
+            break;
+
+          default:
+            break;
+          }
+        }
+      }
       actualizarMenu();
   }
 }
@@ -1226,7 +1332,15 @@ void botonPresionado (){
           }
           if (selectedItem == 4){
             programaManual(); 
-          } else {
+          }
+          if (selectedItem == 5){
+            selectedItem =0;
+            editMode = false;
+            currentState = configWA;
+            pantalla.fillScreen(ST7735_BLACK);
+            actualizarMenu(); 
+          }
+           else {
               Serial.print("No existe este programa\n"); 
           
         }
@@ -1351,6 +1465,16 @@ void botonPresionado (){
           pantalla.fillScreen(ST7735_BLACK);
         }
         actualizarMenu(); 
+      }
+      else if (currentState == configWA){
+        if (selectedItem == 0 || selectedItem == 1) editMode = !editMode; 
+        else if (selectedItem == 2){
+            editMode = false;
+            selectedItem = 5; 
+            currentState = MENU_SELECT;
+            pantalla.fillScreen(ST7735_BLACK);
+          }
+          actualizarMenu(); 
       }
     }
     }
